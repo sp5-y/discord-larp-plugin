@@ -1,37 +1,70 @@
 @echo off
 setlocal EnableExtensions EnableDelayedExpansion
 
-:: ============================================================================
-::  Larp Tool — automated Vencord custom build + plugin install
+:: Larp Tool - full Vencord setup per https://docs.vencord.dev/installing/
 ::
-::  Usage:
-::    auto-setup.bat              Full setup (clone, deps, build, inject)
-::    auto-setup.bat rebuild      Sync plugin + rebuild only
-::    auto-setup.bat inject       Sync plugin + rebuild + inject
+::   auto-setup.bat              clone, plugin, build, patch Discord
+::   auto-setup.bat rebuild      copy plugin + rebuild only
+::   auto-setup.bat inject       rebuild + patch Discord
 ::
-::  Optional environment overrides (set before running):
-::    VENCORD_DIR=C:\path\to\Vencord
-::    NOINJECT=1                     Skip "pnpm inject" at the end
-:: ============================================================================
+::   VENCORD_DIR, DISCORD_BRANCH=auto|stable|ptb|canary, DISCORD_LOCATION
+::   NOINJECT=1, KEEP_DISCORD_OPEN=1
 
-set "PLUGIN_SRC=%~dp0larp\index.tsx"
+set "ROOT=%~dp0"
+set "PLUGIN_SRC=%ROOT%larp\index.tsx"
 set "PLUGIN_NAME=larp"
 set "VENCORD_REPO=https://github.com/Vendicated/Vencord"
+set "EXITCODE=0"
 
 if not defined VENCORD_DIR set "VENCORD_DIR=%LOCALAPPDATA%\Vencord-custom"
 set "USERPLUGIN_DIR=%VENCORD_DIR%\src\userplugins\%PLUGIN_NAME%"
 set "MODE=%~1"
 if not defined MODE set "MODE=setup"
+if not defined DISCORD_BRANCH set "DISCORD_BRANCH=auto"
 
-title Larp Tool — Vencord Setup
+title Larp Tool - Vencord Setup
+goto :main
 
+:finish
 echo.
 echo ============================================================
-echo   Larp Tool — Vencord custom build setup
+echo   Done!
+echo ============================================================
+echo   Build: %VENCORD_DIR%\dist
+echo.
+if /I "%MODE%"=="rebuild" (
+    echo   Rebuild only - Discord was NOT patched.
+    echo   Run: auto-setup.bat inject
+) else if defined NOINJECT (
+    echo   Build only ^(NOINJECT=1^). Run: auto-setup.bat inject
+) else (
+    echo   Next steps:
+    echo     1. Restart Discord completely
+    echo     2. Vencord Settings ^> Plugins ^> enable "Larp Tool"
+    echo     3. Ctrl+B to open
+)
+echo.
+echo   After editing larp\index.tsx:  auto-setup.bat rebuild
+echo.
+pause
+exit /b %EXITCODE%
+
+:failed
+echo.
+echo [FAILED] setup did not complete.
+echo.
+pause
+exit /b 1
+
+:main
+echo.
+echo ============================================================
+echo   Larp Tool - Vencord auto setup
 echo ============================================================
 echo   Plugin:  %PLUGIN_SRC%
 echo   Vencord: %VENCORD_DIR%
 echo   Mode:    %MODE%
+if defined DISCORD_LOCATION (echo   Discord: %DISCORD_LOCATION%) else (echo   Discord branch: %DISCORD_BRANCH%)
 echo ============================================================
 echo.
 
@@ -40,186 +73,153 @@ if /I "%MODE%"=="/?" goto :show_help
 if /I "%MODE%"=="-h" goto :show_help
 
 if not exist "%PLUGIN_SRC%" (
-    echo [ERROR] Plugin file not found: %PLUGIN_SRC%
-    exit /b 1
+    echo [ERROR] Plugin not found: %PLUGIN_SRC%
+    goto :failed
 )
 
-call :require_cmd git "https://git-scm.com/download/win"
-call :require_cmd node "https://nodejs.org/"
-
-call :ensure_pnpm
-if errorlevel 1 exit /b 1
+call :require_cmd git "https://git-scm.com/download/win" || goto :failed
+call :require_cmd node "https://nodejs.org/" || goto :failed
+call :ensure_pnpm || goto :failed
 
 if /I not "%MODE%"=="rebuild" if /I not "%MODE%"=="inject" (
-    call :clone_vencord
-    if errorlevel 1 exit /b 1
+    call :clone_or_update_vencord || goto :failed
 )
 
-call :install_plugin
-if errorlevel 1 exit /b 1
-
-call :install_deps
-if errorlevel 1 exit /b 1
-
-call :build_vencord
-if errorlevel 1 exit /b 1
+call :install_plugin || goto :failed
+call :install_deps || goto :failed
+call :build_vencord || goto :failed
 
 if /I "%MODE%"=="inject" set "NOINJECT="
-if defined NOINJECT goto :skip_inject
-if /I "%MODE%"=="rebuild" goto :skip_inject
+if defined NOINJECT goto :finish
+if /I "%MODE%"=="rebuild" goto :finish
 
-call :inject_vencord
-
-:skip_inject
-echo.
-echo ============================================================
-echo   Done!
-echo ============================================================
-echo.
-echo   Your custom Vencord build is in:
-echo     %VENCORD_DIR%\dist
-echo.
-echo   Next steps:
-echo     1. If you skipped inject, run:  auto-setup.bat inject
-echo     2. Restart Discord completely
-echo     3. Open Vencord Settings ^> Plugins and enable "Larp Tool"
-echo     4. Press Ctrl+B in Discord to open the tool
-echo.
-echo   After editing larp\index.tsx, run:
-echo     auto-setup.bat rebuild
-echo.
-exit /b 0
+call :patch_discord || goto :failed
+goto :finish
 
 :show_help
-echo Usage:
-echo   auto-setup.bat              Full setup (default)
-echo   auto-setup.bat rebuild      Copy plugin and rebuild only
-echo   auto-setup.bat inject       Rebuild and launch Vencord installer
 echo.
-echo Environment variables:
-echo   VENCORD_DIR   Where to clone/build Vencord (default: %%LOCALAPPDATA%%\Vencord-custom)
-echo   NOINJECT=1    Skip the inject step on full setup
+echo Usage:
+echo   auto-setup.bat              Clone Vencord, install plugin, build, patch Discord
+echo   auto-setup.bat rebuild      Copy larp\index.tsx and rebuild (no patch)
+echo   auto-setup.bat inject       Rebuild and patch Discord
+echo.
+echo Environment:
+echo   VENCORD_DIR         Vencord folder (default: %%LOCALAPPDATA%%\Vencord-custom)
+echo   DISCORD_BRANCH      auto ^| stable ^| ptb ^| canary
+echo   DISCORD_LOCATION    Custom Discord install path
+echo   NOINJECT=1          Skip patching Discord
+echo.
+pause
 exit /b 0
 
 :require_cmd
 where %~1 >nul 2>&1
 if not errorlevel 1 exit /b 0
-echo [ERROR] %~1 is not installed or not on PATH.
-echo         Download: %~2
+echo [ERROR] %~1 not on PATH - %~2
 exit /b 1
 
 :ensure_pnpm
 where pnpm >nul 2>&1
 if not errorlevel 1 (
-    echo [OK] pnpm found
+    echo [OK] pnpm
     exit /b 0
 )
-
-echo [..] pnpm not found — enabling via corepack...
-where corepack >nul 2>&1
-if errorlevel 1 (
-    echo [ERROR] corepack is missing. Reinstall Node.js from https://nodejs.org/
-    exit /b 1
-)
-
+echo [..] enabling pnpm via corepack...
+where corepack >nul 2>&1 || (echo [ERROR] corepack missing & exit /b 1)
 corepack enable >nul 2>&1
-corepack prepare pnpm@latest --activate
-if errorlevel 1 (
-    echo [ERROR] Failed to activate pnpm via corepack.
-    echo         Try manually:  corepack enable ^&^& corepack prepare pnpm@latest --activate
-    exit /b 1
-)
-
-where pnpm >nul 2>&1
-if errorlevel 1 (
-    echo [ERROR] pnpm still not available after corepack setup.
-    exit /b 1
-)
-
+call corepack prepare pnpm@latest --activate
+where pnpm >nul 2>&1 || (echo [ERROR] pnpm not available & exit /b 1)
 echo [OK] pnpm ready
 exit /b 0
 
-:clone_vencord
+:clone_or_update_vencord
 if exist "%VENCORD_DIR%\.git" (
-    echo [OK] Vencord repo already exists at %VENCORD_DIR%
+    echo [..] updating Vencord repo...
+    pushd "%VENCORD_DIR%"
+    call git pull --ff-only
+    set "ERR=!ERRORLEVEL!"
+    popd
+    if not "!ERR!"=="0" echo [WARN] git pull failed, using existing copy
+    echo [OK] Vencord at %VENCORD_DIR%
     exit /b 0
 )
-
-echo [..] Cloning Vencord into %VENCORD_DIR% ...
+echo [..] cloning Vencord...
 if not exist "%VENCORD_DIR%" mkdir "%VENCORD_DIR%"
 git clone "%VENCORD_REPO%" "%VENCORD_DIR%"
 if errorlevel 1 (
-    echo [ERROR] git clone failed.
+    echo [ERROR] git clone failed
     exit /b 1
 )
-echo [OK] Vencord cloned
+echo [OK] cloned to %VENCORD_DIR%
 exit /b 0
 
 :install_plugin
-echo [..] Installing plugin into userplugins...
-
+echo [..] copying plugin to src\userplugins\%PLUGIN_NAME%\
 if not exist "%VENCORD_DIR%\src" (
-    echo [ERROR] Vencord source not found at %VENCORD_DIR%
-    echo         Run without "rebuild" first, or set VENCORD_DIR correctly.
+    echo [ERROR] %VENCORD_DIR%\src missing
     exit /b 1
 )
-
 if not exist "%VENCORD_DIR%\src\userplugins" mkdir "%VENCORD_DIR%\src\userplugins"
 if not exist "%USERPLUGIN_DIR%" mkdir "%USERPLUGIN_DIR%"
-
-copy /Y "%PLUGIN_SRC%" "%USERPLUGIN_DIR%\index.tsx" >nul
-if errorlevel 1 (
-    echo [ERROR] Failed to copy plugin to %USERPLUGIN_DIR%
-    exit /b 1
-)
-
-echo [OK] Plugin installed at %USERPLUGIN_DIR%\index.tsx
+copy /Y "%PLUGIN_SRC%" "%USERPLUGIN_DIR%\index.tsx" >nul || exit /b 1
+echo [OK] %USERPLUGIN_DIR%\index.tsx
 exit /b 0
 
 :install_deps
-echo [..] Installing Vencord dependencies (pnpm install --frozen-lockfile)...
+echo [..] pnpm install --frozen-lockfile
 pushd "%VENCORD_DIR%"
 call pnpm install --frozen-lockfile
 set "ERR=!ERRORLEVEL!"
 popd
 if not "!ERR!"=="0" (
-    echo [WARN] frozen lockfile install failed — retrying without --frozen-lockfile...
+    echo [WARN] retrying without --frozen-lockfile...
     pushd "%VENCORD_DIR%"
     call pnpm install
     set "ERR=!ERRORLEVEL!"
     popd
 )
 if not "!ERR!"=="0" (
-    echo [ERROR] pnpm install failed.
+    echo [ERROR] pnpm install failed
     exit /b 1
 )
-echo [OK] Dependencies installed
+echo [OK] deps installed
 exit /b 0
 
 :build_vencord
-echo [..] Building Vencord (pnpm build)...
+echo [..] pnpm build
 pushd "%VENCORD_DIR%"
 call pnpm build
 set "ERR=!ERRORLEVEL!"
 popd
 if not "!ERR!"=="0" (
-    echo [ERROR] pnpm build failed.
+    echo [ERROR] pnpm build failed
     exit /b 1
 )
-echo [OK] Build complete — output in %VENCORD_DIR%\dist
+echo [OK] %VENCORD_DIR%\dist
 exit /b 0
 
-:inject_vencord
-echo [..] Launching Vencord installer (pnpm inject)...
-echo      Select your Discord install in the GUI that opens.
-echo.
+:patch_discord
+echo [..] patching Discord (non-interactive)...
+if not defined KEEP_DISCORD_OPEN (
+    echo      closing Discord...
+    taskkill /IM Discord.exe /F >nul 2>&1
+    taskkill /IM DiscordCanary.exe /F >nul 2>&1
+    taskkill /IM DiscordPTB.exe /F >nul 2>&1
+    timeout /t 2 /nobreak >nul
+)
 pushd "%VENCORD_DIR%"
-call pnpm inject
+if defined DISCORD_LOCATION (
+    echo      location: %DISCORD_LOCATION%
+    call node scripts/runInstaller.mjs -- --install --location "%DISCORD_LOCATION%"
+) else (
+    echo      branch: %DISCORD_BRANCH%
+    call node scripts/runInstaller.mjs -- --install --branch %DISCORD_BRANCH%
+)
 set "ERR=!ERRORLEVEL!"
 popd
 if not "!ERR!"=="0" (
-    echo [WARN] pnpm inject exited with code !ERR! — you can rerun: auto-setup.bat inject
-    exit /b 0
+    echo [ERROR] patch failed - try: set DISCORD_BRANCH=stable
+    exit /b 1
 )
-echo [OK] Inject step finished
+echo [OK] Discord patched with your custom build
 exit /b 0
