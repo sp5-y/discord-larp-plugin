@@ -1,20 +1,19 @@
 # Discord Larp Tool (Vencord plugin)
 
-A [Vencord](https://github.com/Vendicated/Vencord) userplugin that lets you customize how **your own** profile looks locally — badges, `@username`, and connected accounts.
+A [Vencord](https://github.com/Vendicated/Vencord) userplugin that lets you customize how **your own** profile looks visually with badges, & custom handles
 
 **Client-side only.** Nothing is sent to Discord's servers. Only you see the changes.
 
 ## Features
 
-- **Add badges** — show badges you don't actually have (Staff, Nitro tiers, HypeSquad, etc.)
+- **Add badges** — toggle badges on your profile
 - **Hide badges** — toggle off badges you do have
-- **Custom `@username`** — display a different handle in the UI
-- **Connection overrides** — rename linked accounts on your profile
-- **Badge manager UI** — press **Ctrl+B** or use the button in plugin settings
+- **Custom `@username`** — display a custom username
+- **Custom connections** — rename linked connections
 
 ## Requirements
 
-- [Discord Desktop](https://discord.com/download) (patched with a custom Vencord build)
+- [Discord Desktop](https://discord.com/download)
 - [Git](https://git-scm.com/download/win)
 - [Node.js](https://nodejs.org/) (includes `corepack` for pnpm)
 
