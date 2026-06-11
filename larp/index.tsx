@@ -1112,6 +1112,7 @@ export default definePlugin({
     description: "Spoof badges and @username locally. Ctrl+B to open.",
     authors: [{ name: "allbadges", id: 0n }],
     dependencies: ["BadgeAPI"],
+    enabledByDefault: true,
     settings,
 
     patches: [
