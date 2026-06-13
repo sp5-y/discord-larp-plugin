@@ -3,8 +3,8 @@
 A [Vencord](https://github.com/Vendicated/Vencord) userplugin that customizes how **your own** profile looks visully 
 
 <p align="center">
-  <img src="./prev.png" width="48%" alt="Larp Tool manager" />
-  <img src="./prev2.png" width="48%" alt="Profile preview" />
+  <img src="./assets/prev.png" width="48%" alt="preview" />
+  <img src="./assets/prev2.png" width="48%" alt="preview" />
 </p>
 
 ## Features
