@@ -13,6 +13,7 @@ A [Vencord](https://github.com/Vendicated/Vencord) userplugin that customizes ho
 - **Hide badges** — toggle off badges you actually own
 - **Custom `@username`** — spoof your handle in profile, settings, and messages
 - **Connections** — rename real connections, or add fake ones
+- **Decorations** — add decorations without owning them
 
 ## Requirements
 
@@ -29,16 +30,6 @@ auto-setup.bat
 ```
 
 Restart Discord fully. Press **CTRL + B** inside of discord to open the tool
-
-**Optional .bat setup variables:**
-
-```bat
-set DISCORD_BRANCH=stable          :: auto | stable | ptb | canary
-set DISCORD_LOCATION=C:\path\to\Discord
-set VENCORD_DIR=C:\path\to\Vencord
-set NOINJECT=1                     :: build only, skip patching Discord
-auto-setup.bat
-```
 
 ## Manual setup
 
@@ -57,42 +48,8 @@ Follow the [Vencord custom plugins guide](https://docs.vencord.dev/installing/cu
 | **Username** | Set a custom `@username` shown in the client |
 | **Badges** | Search, hide owned badges, or add fake ones |
 | **Connections** | Override handles, hide real links, or add fake connections |
-| **Config** | Export/import your setup as JSON |
 
 Use **Reset** in the modal to clear all overrides.
-
-### Sharing configs
-
-Export from the **Config** tab and share the JSON file. Example:
-
-```json
-{
-  "version": 1,
-  "customUsername": "coolname",
-  "hiddenBadges": ["active_developer"],
-  "addedBadges": ["staff", "premium_opal"],
-  "connectionOverrides": {
-    "github:123456": { "name": "myhandle" }
-  },
-  "hiddenConnections": ["instagram:789"],
-  "customConnections": [
-    { "id": "larp-github-1", "type": "github", "name": "myhandle" },
-    { "id": "larp-domain-1", "type": "domain", "name": "example.com" }
-  ]
-}
-```
-
-## Project structure
-
-```
-discord-larp-plugin/
-├── auto-setup.bat
-├── prev.png
-├── prev2.png
-├── larp/
-│   └── index.tsx
-└── README.md
-```
 
 ## Disclaimer
 
