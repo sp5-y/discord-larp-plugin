@@ -1,25 +1,28 @@
-# Discord Larp Tool (Vencord plugin)
+# Discord Larp Tool
 
-A [Vencord](https://github.com/Vendicated/Vencord) userplugin that lets you customize how **your own** profile looks visually with badges, & custom handles
+A [Vencord](https://github.com/Vendicated/Vencord) userplugin that customizes how **your own** profile looks visully 
 
-**Client-side only.** Nothing is sent to Discord's servers. Only you see the changes.
+<p align="center">
+  <img src="./prev.png" width="48%" alt="Larp Tool manager" />
+  <img src="./prev2.png" width="48%" alt="Profile preview" />
+</p>
 
 ## Features
 
-- **Add badges** — toggle badges on your profile
-- **Hide badges** — toggle off badges you do have
-- **Custom `@username`** — display a custom username
-- **Custom connections** — rename linked connections
+- **Add badges** — show badges you don't have
+- **Hide badges** — toggle off badges you actually own
+- **Custom `@username`** — spoof your handle in profile, settings, and messages
+- **Connections** — rename real connections, or add fake ones
 
 ## Requirements
 
-- [Discord Desktop](https://discord.com/download)
+- [Discord Desktop](https://discord.com/download) (patched with a custom Vencord build)
 - [Git](https://git-scm.com/download/win)
 - [Node.js](https://nodejs.org/) (includes `corepack` for pnpm)
 
-## Quick setup (Windows)
+## Quick setup
 
-Run the included script from this folder:
+Clone this repo, then run:
 
 ```bat
 auto-setup.bat
@@ -27,12 +30,12 @@ auto-setup.bat
 
 This will:
 
-1. Clone Vencord to `%LOCALAPPDATA%\Vencord-custom`
-2. Copy `larp/index.tsx` into Vencord's `src/userplugins/larp/`
-3. Install dependencies and build
-4. Launch the Vencord installer (`pnpm inject`) — pick your Discord install in the GUI
+1. Clone/update Vencord to `%LOCALAPPDATA%\Vencord-custom`
+2. Copy `larp/index.tsx` into `src/userplugins/larp/`
+3. Run `pnpm install` and `pnpm build`
+4. Patch Discord automatically
 
-Then restart Discord, open **Vencord Settings → Plugins**, and enable **Larp Tool**.
+Restart Discord fully. **Larp Tool** is enabled by default — if you turned it off before, re-enable it under **Vencord Settings → Plugins**.
 
 ### Script commands
 
@@ -41,43 +44,85 @@ Then restart Discord, open **Vencord Settings → Plugins**, and enable **Larp T
 | `auto-setup.bat` | Full first-time setup |
 | `auto-setup.bat rebuild` | Copy plugin + rebuild after edits |
 | `auto-setup.bat inject` | Rebuild + re-patch Discord |
-| `auto-setup.bat help` | Show options |
+| `auto-setup.bat help` | Show all options |
 
-**Optional env vars:**
+**Optional environment variables:**
 
 ```bat
+set DISCORD_BRANCH=stable          :: auto | stable | ptb | canary
+set DISCORD_LOCATION=C:\path\to\Discord
 set VENCORD_DIR=C:\path\to\Vencord
-set NOINJECT=1
+set NOINJECT=1                     :: build only, skip patching Discord
 auto-setup.bat
+```
+
+After editing `larp/index.tsx`:
+
+```bat
+auto-setup.bat rebuild
+auto-setup.bat inject
 ```
 
 ## Manual setup
 
-If you prefer to do it yourself, follow the [Vencord custom plugins guide](https://docs.vencord.dev/installing/custom-plugins/):
+Follow the [Vencord custom plugins guide](https://docs.vencord.dev/installing/custom-plugins/):
 
 1. [Build Vencord from source](https://docs.vencord.dev/installing/#building-vencord)
 2. Create `src/userplugins/larp/` in your Vencord folder
 3. Copy `larp/index.tsx` into that folder
-4. Run `pnpm build` and `pnpm inject`
-5. Restart Discord and enable the plugin
+4. Run `pnpm build` and patch Discord (`pnpm inject` or the installer script)
+5. Restart Discord and enable **Larp Tool**
 
 ## Usage
 
-1. Enable **Larp Tool** in Vencord plugin settings
-2. Press **Ctrl+B** to open the manager (or click **Open Larp Tool** in settings)
-3. Toggle badges, set a custom username, or edit connection names
-4. Use **Reset** in the modal to clear all overrides
+Press **Ctrl+B** or click **Open Larp Tool** in plugin settings.
+
+| Tab | What it does |
+|---|---|
+| **Username** | Set a custom `@username` shown in the client |
+| **Badges** | Search, hide owned badges, or add fake ones |
+| **Connections** | Override handles, hide real links, or add fake connections |
+| **Config** | Export/import your setup as JSON |
+
+Use **Reset** in the modal to clear all overrides.
+
+### Sharing configs
+
+Export from the **Config** tab and share the JSON file. Example:
+
+```json
+{
+  "version": 1,
+  "customUsername": "coolname",
+  "hiddenBadges": ["active_developer"],
+  "addedBadges": ["staff", "premium_opal"],
+  "connectionOverrides": {
+    "github:123456": { "name": "myhandle" }
+  },
+  "hiddenConnections": ["instagram:789"],
+  "customConnections": [
+    { "id": "larp-github-1", "type": "github", "name": "myhandle" },
+    { "id": "larp-domain-1", "type": "domain", "name": "example.com" }
+  ]
+}
+```
 
 ## Project structure
 
 ```
-discordlarp/
-├── auto-setup.bat    # Automated Vencord build + install
+discord-larp-plugin/
+├── auto-setup.bat
+├── prev.png
+├── prev2.png
 ├── larp/
-│   └── index.tsx     # Vencord userplugin source
+│   └── index.tsx
 └── README.md
 ```
 
 ## Disclaimer
 
-This is a custom Vencord userplugin for local UI customization. You are responsible for your own install. Vencord does not officially support custom plugins — see their [custom plugins docs](https://docs.vencord.dev/installing/custom-plugins/) for details.
+This plugin only changes what **you** see in your Discord client. It does not modify your account on Discord's servers. Vencord custom plugins are unofficial — see the [custom plugins docs](https://docs.vencord.dev/installing/custom-plugins/).
+
+---
+
+made by [sp5](https://github.com/sp5-y/discord-larp-plugin)
