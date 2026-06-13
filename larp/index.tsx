@@ -4,13 +4,16 @@ import definePlugin, { OptionType } from "@utils/types";
 import { definePluginSettings } from "@api/Settings";
 import { addProfileBadge, BadgePosition, ProfileBadge, removeProfileBadge } from "@api/Badges";
 import ErrorBoundary from "@components/ErrorBoundary";
+import { copyWithToast } from "@utils/discord";
 import { RenderModalProps, User } from "@vencord/discord-types";
-import { waitFor, filters } from "@webpack";
+import type { Embed, Message } from "@vencord/discord-types";
+import { waitFor, filters, findByCodeLazy, findByPropsLazy } from "@webpack";
 import {
     AuthenticationStore, ConnectedAccount, Constants, FluxDispatcher,
     openModal, Modal, TextInput, Checkbox, Button, Forms, Text,
     DisplayProfileUtils, ScrollerThin, UserProfileStore, UserStore,
-    UsernameUtils, useStateFromStores,
+    UsernameUtils, useStateFromStores, TabBar, useState, useRef, useEffect,
+    showToast, Toasts, SearchableSelect, RestAPI, MessageStore, Parser,
 } from "@webpack/common";
 
 interface BadgeEntry {
@@ -20,12 +23,81 @@ interface BadgeEntry {
     link?: string;
 }
 
+interface LarpCustomConnection {
+    id: string;
+    type: string;
+    name: string;
+}
+
 function getCurrentUserId() {
     return AuthenticationStore.getId();
 }
 
 function connKey(c: ConnectedAccount) {
     return `${c.type}:${c.id}`;
+}
+
+function connectionTypeLabel(type: string) {
+    return type.split(/[-_]/).map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
+}
+
+function connectionNeedsDomain(type: string) {
+    return type === "domain";
+}
+
+function normalizeDomain(input?: string) {
+    if (!input) return "";
+    return input.trim().replace(/^https?:\/\//i, "").replace(/\/.*$/, "");
+}
+
+const CONNECTION_TYPE_OPTIONS = [
+    "amazon-music", "battlenet", "bluesky", "bungie", "crunchyroll", "domain",
+    "ebay", "epicgames", "facebook", "github", "instagram", "leagueoflegends",
+    "mastodon", "paypal", "playstation", "reddit", "riotgames", "roblox",
+    "samsung", "skype", "soundcloud", "spotify", "steam", "tiktok",
+    "twitch", "twitter", "xbox", "youtube",
+].map(type => ({ value: type, label: connectionTypeLabel(type) }));
+
+function buildFakeConnection(c: LarpCustomConnection): ConnectedAccount | null {
+    const id = c.id || `larp-${c.type}-${Date.now()}`;
+
+    if (c.type === "domain") {
+        const domain = normalizeDomain(c.name);
+        if (!domain) return null;
+        return { type: "domain", id, name: domain, verified: true };
+    }
+
+    const handle = c.name.trim();
+    if (!handle) return null;
+
+    return {
+        type: c.type as ConnectedAccount["type"],
+        id,
+        name: handle,
+        verified: true,
+    };
+}
+
+function getRealConnections() {
+    const userId = getCurrentUserId() ?? "";
+    if (!userId) return [] as ConnectedAccount[];
+    return origGetUserProfile?.(userId)?.connectedAccounts ?? [];
+}
+
+async function refreshOwnProfile() {
+    const userId = getCurrentUserId();
+    if (!userId) return;
+
+    try {
+        const { body } = await RestAPI.get({
+            url: Constants.Endpoints.USER_PROFILE(userId),
+            query: { with_mutual_guilds: false, with_mutual_friends_count: false },
+            oldFormErrors: true,
+        });
+
+        FluxDispatcher.dispatch({ type: "USER_UPDATE", user: body.user });
+        await FluxDispatcher.dispatch({ type: "USER_PROFILE_FETCH_SUCCESS", userProfile: body });
+    } catch { }
 }
 
 const UserFlags = Constants.UserFlags as Record<string, number>;
@@ -151,8 +223,18 @@ const settings = definePluginSettings({
         type: OptionType.CUSTOM,
         default: {} as Record<string, { name?: string }>,
     },
+    hiddenConnections: {
+        type: OptionType.CUSTOM,
+        default: [] as string[],
+    },
+    customConnections: {
+        type: OptionType.CUSTOM,
+        default: [] as LarpCustomConnection[],
+    },
 });
 
+const useLegacyPlatformType: (platform: string) => string = findByCodeLazy(".TWITTER_LEGACY:");
+const connectionPlatforms: { get(type: string): { icon: { lightSVG: string; darkSVG: string; }; getPlatformUserUrl?(c: ConnectedAccount): string; }; } = findByPropsLazy("isSupported", "getByUrl");
 const unpatchFns: (() => void)[] = [];
 
 // discord cdn hashes for hiding badges when runtime id is wrong
@@ -183,9 +265,131 @@ let unfilteredGetBadges: ((this: { userId: string }) => Array<{
 }>) | null = null;
 
 let origGetUserProfile: typeof UserProfileStore.getUserProfile;
+let origGetCurrentUser: typeof UserStore.getCurrentUser;
+let origGetUser: typeof UserStore.getUser;
+let origGetMessage: typeof MessageStore.getMessage;
+let origGetMessages: typeof MessageStore.getMessages;
+let origParserParse: typeof Parser.parse;
 let cachedRealUsername = "";
+const wrappedMessageCache = new Map<string, Message>();
+const usernameProxyCache = new WeakMap<User, User>();
+const displayProfileProxyCache = new WeakMap<object, unknown>();
+const messageCollectionProxyCache = new WeakMap<object, ReturnType<typeof MessageStore.getMessages>>();
+const wrappedProfileCache = new WeakMap<object, { gen: number; value: NonNullable<ReturnType<typeof UserProfileStore.getUserProfile>>; }>();
+let profileWrapGeneration = 0;
+let messageCollectionGeneration = 0;
+let hiddenBadgeSetCache: Set<string> | null = null;
+let hiddenBadgeSetCacheKey = "";
+
+interface UsernameSwapCtx {
+    active: boolean;
+    real: string;
+    custom: string;
+}
+
+let usernameSwapCtx: UsernameSwapCtx = { active: false, real: "", custom: "" };
+let badgeProfileUserId: string | undefined;
 
 const HIDDEN_BADGE_STYLE_ID = "vc-larp-tool-hidden-badges";
+const LARP_EXPORT_VERSION = 1;
+
+const ModalTabs = { Username: 0, Badges: 1, Connections: 2, Data: 3 } as const;
+
+interface LarpExportData {
+    version?: number;
+    name?: string;
+    customUsername?: string;
+    hiddenBadges?: string[];
+    addedBadges?: string[];
+    connectionOverrides?: Record<string, { name?: string }>;
+    hiddenConnections?: string[];
+    customConnections?: LarpCustomConnection[];
+}
+
+const cardStyle = {
+    padding: "10px 12px",
+    borderRadius: 10,
+    background: "var(--background-tertiary)",
+    border: "1px solid var(--background-modifier-accent)",
+};
+
+const connectionRowStyle = {
+    display: "flex",
+    alignItems: "center",
+    gap: 10,
+    padding: "8px 12px",
+    borderRadius: 10,
+    background: "var(--background-tertiary)",
+    border: "1px solid var(--background-modifier-accent)",
+};
+
+const sectionTitleStyle = {
+    margin: "0 0 10px",
+    color: "var(--header-secondary)",
+    fontSize: 11,
+    fontWeight: 700,
+    letterSpacing: "0.06em",
+    textTransform: "uppercase" as const,
+};
+
+function getLarpExportData(): LarpExportData {
+    return {
+        version: LARP_EXPORT_VERSION,
+        customUsername: settings.store.customUsername,
+        hiddenBadges: [...settings.store.hiddenBadges],
+        addedBadges: [...settings.store.addedBadges],
+        connectionOverrides: { ...settings.store.connectionOverrides },
+        hiddenConnections: [...settings.store.hiddenConnections],
+        customConnections: settings.store.customConnections.map(c => ({ ...c })),
+    };
+}
+
+function applyLarpExportData(data: LarpExportData) {
+    settings.store.customUsername = typeof data.customUsername === "string" ? data.customUsername.slice(0, 32) : "";
+    settings.store.hiddenBadges = Array.isArray(data.hiddenBadges)
+        ? data.hiddenBadges.filter(x => typeof x === "string")
+        : [];
+    settings.store.addedBadges = Array.isArray(data.addedBadges)
+        ? data.addedBadges.filter(x => typeof x === "string")
+        : [];
+    settings.store.connectionOverrides = data.connectionOverrides && typeof data.connectionOverrides === "object"
+        ? { ...data.connectionOverrides }
+        : {};
+    settings.store.hiddenConnections = Array.isArray(data.hiddenConnections)
+        ? data.hiddenConnections.filter(x => typeof x === "string")
+        : [];
+    settings.store.customConnections = Array.isArray(data.customConnections)
+        ? data.customConnections.filter(c => c?.id && c?.type).map(c => ({
+            id: String(c.id),
+            type: String(c.type),
+            name: typeof c.name === "string" ? c.name : "",
+        }))
+        : [];
+    updateHiddenBadgeStyles();
+    triggerProfileRefresh();
+}
+
+function parseLarpImport(raw: string): LarpExportData | null {
+    try {
+        const data = JSON.parse(raw) as LarpExportData;
+        if (!data || typeof data !== "object") return null;
+        if (data.version != null && data.version !== LARP_EXPORT_VERSION) return null;
+        return data;
+    } catch {
+        return null;
+    }
+}
+
+function resetLarpConfig() {
+    applyLarpExportData({
+        customUsername: "",
+        hiddenBadges: [],
+        addedBadges: [],
+        connectionOverrides: {},
+        hiddenConnections: [],
+        customConnections: [],
+    });
+}
 
 function getRawUserProfile(userId: string) {
     return origGetUserProfile?.(userId) ?? UserProfileStore.getUserProfile(userId);
@@ -325,11 +529,19 @@ function expandBadgeHideIds(id: string): string[] {
 }
 
 function getHiddenBadgeSet() {
-    const hidden = new Set<string>();
+    const key = settings.store.hiddenBadges.join("\0");
+    if (hiddenBadgeSetCache && key === hiddenBadgeSetCacheKey) return hiddenBadgeSetCache;
+
+    hiddenBadgeSetCacheKey = key;
+    hiddenBadgeSetCache = new Set<string>();
     for (const id of settings.store.hiddenBadges) {
-        for (const expanded of expandBadgeHideIds(id)) hidden.add(expanded);
+        for (const expanded of expandBadgeHideIds(id)) hiddenBadgeSetCache.add(expanded);
     }
-    return hidden;
+    return hiddenBadgeSetCache;
+}
+
+function invalidateHiddenBadgeCache() {
+    hiddenBadgeSetCache = null;
 }
 
 function isBadgeHiddenKey(key: string) {
@@ -386,6 +598,20 @@ function getLiveNativeBadges() {
     } catch { }
 
     return getRawUserProfile(userId)?.badges ?? [];
+}
+
+function getUnfilteredOwnedBadges() {
+    const userId = getCurrentUserId();
+    if (!userId) return [] as Array<{ id?: string; key?: string; description?: string; icon?: string; iconSrc?: string; link?: string; }>;
+
+    if (unfilteredGetBadges) {
+        try {
+            const profile = DisplayProfileUtils.getDisplayProfile(userId);
+            if (profile) return unfilteredGetBadges.call(profile);
+        } catch { }
+    }
+
+    return origGetUserProfile?.(userId)?.badges ?? getRawUserProfile(userId)?.badges ?? [];
 }
 
 function captureHiddenIdentifiers(id: string) {
@@ -475,12 +701,14 @@ function updateHiddenBadgeStyles() {
 
 function wrapDisplayProfile<T extends { userId: string; getBadges(): unknown[]; }>(profile: T | null): T | null {
     if (!profile?.userId || profile.userId !== getCurrentUserId() || !settings.store.enabled) return profile;
-    if ((profile as { __larpToolWrapped?: boolean; }).__larpToolWrapped) return profile;
+
+    const cached = displayProfileProxyCache.get(profile);
+    if (cached) return cached as T;
 
     const userId = profile.userId;
     const origGetBadges = profile.getBadges.bind(profile);
 
-    return new Proxy(profile, {
+    const proxy = new Proxy(profile, {
         get(target, prop, receiver) {
             if (prop === "getBadges") {
                 return () => filterBadges({ userId }, origGetBadges() as Array<{
@@ -491,10 +719,12 @@ function wrapDisplayProfile<T extends { userId: string; getBadges(): unknown[]; 
                 }>);
             }
             if (prop === "__larpToolWrapped") return true;
-            const value = Reflect.get(target, prop, receiver);
-            return typeof value === "function" ? value.bind(target) : value;
+            return Reflect.get(target, prop, receiver);
         },
     }) as T;
+
+    displayProfileProxyCache.set(profile, proxy);
+    return proxy;
 }
 
 
@@ -510,7 +740,18 @@ function withCustomUsernameOnly(user: User | null | undefined): User | null | un
     const custom = getCustomName();
     if (!custom || user.username === custom) return user;
 
-    return Object.assign(Object.create(Object.getPrototypeOf(user)), user, { username: custom });
+    const cached = usernameProxyCache.get(user);
+    if (cached) return cached;
+
+    const proxy = new Proxy(user, {
+        get(target, prop, receiver) {
+            if (prop === "username") return custom;
+            return Reflect.get(target, prop, receiver);
+        },
+    }) as User;
+
+    usernameProxyCache.set(user, proxy);
+    return proxy;
 }
 
 function getAccountSettingsUsername(user: User) {
@@ -518,35 +759,154 @@ function getAccountSettingsUsername(user: User) {
     return getCustomName() ?? user.username;
 }
 
+function refreshUsernameSwapCtx() {
+    const prev = usernameSwapCtx;
+
+    if (!settings.store.enabled) {
+        usernameSwapCtx = { active: false, real: "", custom: "" };
+    } else {
+        const custom = settings.store.customUsername.trim();
+        const real = cachedRealUsername || origGetCurrentUser?.()?.username || "";
+        usernameSwapCtx = !custom || !real || real === custom
+            ? { active: false, real, custom }
+            : { active: true, real, custom };
+    }
+
+    if (prev.active !== usernameSwapCtx.active || prev.real !== usernameSwapCtx.real || prev.custom !== usernameSwapCtx.custom) {
+        wrappedMessageCache.clear();
+        messageCollectionGeneration++;
+        profileWrapGeneration++;
+    }
+}
+
+function getRealUsername() {
+    if (cachedRealUsername) return cachedRealUsername;
+    return origGetCurrentUser?.()?.username ?? "";
+}
+
+function swapRealUsernameInText(text: string | null | undefined) {
+    if (!text || !usernameSwapCtx.active || !text.includes(usernameSwapCtx.real)) return text ?? "";
+    return text.split(usernameSwapCtx.real).join(usernameSwapCtx.custom);
+}
+
+function embedMentionsRealUsername(embed: Embed, real: string) {
+    if (embed.rawTitle?.includes(real)) return true;
+    if (embed.rawDescription?.includes(real)) return true;
+    if (embed.author?.name?.includes(real)) return true;
+    if (embed.footer?.text?.includes(real)) return true;
+    if (embed.provider?.name?.includes(real)) return true;
+    return embed.fields?.some(f => f.rawName?.includes(real) || f.rawValue?.includes(real)) ?? false;
+}
+
+function messageMentionsRealUsername(message: Message, real: string) {
+    if (message.content?.includes(real)) return true;
+    if (message.embeds?.some(e => embedMentionsRealUsername(e, real))) return true;
+    return message.messageSnapshots?.some(s => s.message && messageMentionsRealUsername(s.message as Message, real)) ?? false;
+}
+
+function mapEmbed(embed: Embed): Embed {
+    const { active, real } = usernameSwapCtx;
+    if (!active || !embedMentionsRealUsername(embed, real)) return embed;
+
+    return {
+        ...embed,
+        rawTitle: swapRealUsernameInText(embed.rawTitle),
+        rawDescription: swapRealUsernameInText(embed.rawDescription),
+        author: embed.author ? { ...embed.author, name: swapRealUsernameInText(embed.author.name) } : embed.author,
+        footer: embed.footer ? { ...embed.footer, text: swapRealUsernameInText(embed.footer.text) } : embed.footer,
+        provider: embed.provider ? { ...embed.provider, name: swapRealUsernameInText(embed.provider.name ?? "") } : embed.provider,
+        fields: embed.fields?.map(f => ({
+            ...f,
+            rawName: swapRealUsernameInText(f.rawName),
+            rawValue: swapRealUsernameInText(f.rawValue),
+        })) ?? embed.fields,
+    };
+}
+
+function wrapMessageForDisplay(message: Message | null | undefined): Message | null | undefined {
+    if (!message?.id || !usernameSwapCtx.active) return message;
+
+    const { real, custom } = usernameSwapCtx;
+    if (!messageMentionsRealUsername(message, real)) return message;
+
+    const cacheKey = `${message.id}:${message.edited_timestamp ?? message.timestamp}:${custom}:${real}`;
+    const cached = wrappedMessageCache.get(cacheKey);
+    if (cached) return cached;
+
+    const content = swapRealUsernameInText(message.content);
+    const embeds = message.embeds?.map(mapEmbed) ?? message.embeds;
+    const messageSnapshots = message.messageSnapshots?.map(s => ({
+        ...s,
+        message: s.message ? wrapMessageForDisplay(s.message as Message) : s.message,
+    })) ?? message.messageSnapshots;
+
+    const wrapped = new Proxy(message, {
+        get(target, prop, receiver) {
+            if (prop === "content") return content;
+            if (prop === "embeds") return embeds;
+            if (prop === "messageSnapshots") return messageSnapshots;
+            return Reflect.get(target, prop, receiver);
+        },
+    }) as Message;
+
+    wrappedMessageCache.set(cacheKey, wrapped);
+    if (wrappedMessageCache.size > 500) {
+        wrappedMessageCache.delete(wrappedMessageCache.keys().next().value!);
+    }
+
+    return wrapped;
+}
+
+function invalidateRuntimeCaches() {
+    invalidateHiddenBadgeCache();
+    profileWrapGeneration++;
+    messageCollectionGeneration++;
+    wrappedMessageCache.clear();
+    refreshUsernameSwapCtx();
+}
+
 function refreshCachedUsername() {
-    const user = UserStore.getCurrentUser();
+    const user = origGetCurrentUser?.() ?? UserStore.getCurrentUser();
     if (!user?.id || user.id !== getCurrentUserId()) return;
 
     const custom = getCustomName();
     if (!custom || user.username !== custom) {
         cachedRealUsername = user.username;
     }
+    refreshUsernameSwapCtx();
 }
 
-function applyConnectionOverrides(connections: ConnectedAccount[] | undefined) {
-    if (!connections?.length || !settings.store.enabled) return connections;
+function applyLarpConnections(connections: ConnectedAccount[] | undefined) {
+    if (!settings.store.enabled) return connections;
 
     const overrides = settings.store.connectionOverrides;
-    let changed = false;
+    const hidden = new Set(settings.store.hiddenConnections ?? []);
+    const custom = settings.store.customConnections ?? [];
+    const base = connections ?? [];
 
-    const mapped = connections.map(connection => {
-        const key = connKey(connection);
-        const override = overrides[key] ?? overrides[connection.type];
-        if (!override) return connection;
+    if (!base.length && !custom.length && !Object.keys(overrides).length && !hidden.size) return connections;
 
-        const name = override.name?.trim();
-        if (!name) return connection;
+    const usedTypes = new Set(base.map(c => c.type));
 
-        changed = true;
-        return { ...connection, name };
-    });
+    const mapped = base
+        .filter(connection => !hidden.has(connKey(connection)))
+        .map(connection => {
+            const key = connKey(connection);
+            const override = overrides[key] ?? overrides[connection.type];
+            const name = override?.name?.trim();
+            if (!name) return connection;
+            return { ...connection, name };
+        });
 
-    return changed ? mapped : connections;
+    for (const cc of custom) {
+        if (!cc.type || usedTypes.has(cc.type)) continue;
+        const built = buildFakeConnection(cc);
+        if (!built) continue;
+        mapped.push(built);
+        usedTypes.add(cc.type);
+    }
+
+    return mapped;
 }
 
 function swapUsernameTag(user: User | null | undefined, tag: string) {
@@ -555,7 +915,7 @@ function swapUsernameTag(user: User | null | undefined, tag: string) {
     const custom = getCustomName();
     if (!custom || typeof tag !== "string") return tag;
 
-    const real = cachedRealUsername || user.username;
+    const real = getRealUsername();
     if (real && tag.includes(real)) return tag.replace(real, custom);
     return tag.includes(user.username) ? tag.replace(user.username, custom) : tag;
 }
@@ -566,24 +926,50 @@ function getNativeBadgeIds(): Set<string> {
 
     const ids = new Set<string>();
 
-    for (const badge of getRawUserProfile(userId)?.badges ?? []) {
+    for (const badge of getUnfilteredOwnedBadges()) {
+        const key = getBadgeKey(badge);
+        if (key) ids.add(key);
+    }
+
+    for (const badge of origGetUserProfile?.(userId)?.badges ?? getRawUserProfile(userId)?.badges ?? []) {
         const key = getBadgeKey(badge);
         if (key) ids.add(key);
     }
 
     const user = UserStore.getCurrentUser();
-    if (!user) return ids;
-
-    for (const [key, flag] of Object.entries(UserFlags)) {
-        if (typeof flag !== "number") continue;
-        if (!user.hasFlag(flag)) continue;
-        const badgeId = FLAG_BADGE_IDS[key.toLowerCase()];
-        if (badgeId) ids.add(badgeId);
+    if (user) {
+        for (const [key, flag] of Object.entries(UserFlags)) {
+            if (typeof flag !== "number") continue;
+            if (!user.hasFlag(flag)) continue;
+            const badgeId = FLAG_BADGE_IDS[key.toLowerCase()];
+            if (badgeId) ids.add(badgeId);
+        }
+        if (user.premiumType) ids.add("premium_bronze");
     }
 
-    if (user.premiumType) ids.add("premium_bronze");
-
     return ids;
+}
+
+function runtimeBadgeToEntry(badge: {
+    id?: string;
+    key?: string;
+    description?: string;
+    icon?: string;
+    iconSrc?: string;
+    link?: string;
+}): BadgeEntry | null {
+    const id = getBadgeKey(badge);
+    if (!id) return null;
+
+    const known = KNOWN_BADGES[id];
+    return {
+        id,
+        description: badge.description ?? known?.description ?? id.replace(/_/g, " "),
+        icon: badge.iconSrc?.startsWith("http")
+            ? badge.iconSrc
+            : BADGE_ICON_MAP[id] ?? known?.icon ?? (badge.icon ?? ""),
+        link: badge.link ?? known?.link,
+    };
 }
 
 function isOwnedBadgeVisible(id: string) {
@@ -608,6 +994,7 @@ function setOwnedBadgeVisible(id: string, visible: boolean) {
 
     settings.store.hiddenBadges = hidden;
     settings.store.addedBadges = settings.store.addedBadges.filter(x => !expanded.includes(x));
+    invalidateHiddenBadgeCache();
     updateHiddenBadgeStyles();
     triggerProfileRefresh();
 }
@@ -626,14 +1013,20 @@ function setAddedBadgeVisible(id: string, visible: boolean) {
 }
 
 function triggerProfileRefresh() {
+    invalidateRuntimeCaches();
     const userId = getCurrentUserId();
     const user = UserStore.getCurrentUser();
     if (!user || !userId) return;
 
     FluxDispatcher.dispatch({ type: "USER_UPDATE", user });
 
-    const profile = getRawUserProfile(userId);
-    if (profile) {
+    const profile = origGetUserProfile?.(userId);
+    if (profile && settings.store.enabled) {
+        FluxDispatcher.dispatch({
+            type: "USER_PROFILE_UPDATE",
+            userProfile: wrapOwnUserProfile(profile, userId),
+        });
+    } else if (profile) {
         FluxDispatcher.dispatch({ type: "USER_PROFILE_UPDATE", userProfile: profile });
     }
 }
@@ -642,9 +1035,10 @@ function filterBadges(
     profile: { userId?: string; user?: { id: string; }; },
     badges: Array<{ id?: string; key?: string; }>
 ) {
-    if (!settings.store.enabled) return badges;
-
     const userId = profile?.userId ?? profile?.user?.id;
+    badgeProfileUserId = userId;
+
+    if (!settings.store.enabled) return badges;
     if (!userId || userId !== getCurrentUserId()) return badges;
 
     return badges.filter(b => {
@@ -656,47 +1050,42 @@ function filterBadges(
 
 function getModalBadgeLists() {
     const ownedIds = getNativeBadgeIds();
-    const profileBadges = getRawUserProfile(getCurrentUserId() ?? "")?.badges ?? [];
-    const entries = new Map<string, BadgeEntry>();
-
-    for (const [id, def] of Object.entries(KNOWN_BADGES)) {
-        entries.set(id, { id, ...def });
-    }
-
-    for (const badge of profileBadges) {
-        if (!badge.id) continue;
-        ownedIds.add(badge.id);
-
-        const existing = entries.get(badge.id);
-        entries.set(badge.id, {
-            id: badge.id,
-            description: badge.description ?? existing?.description ?? badge.id.replace(/_/g, " "),
-            icon: badge.iconSrc?.startsWith("http")
-                ? badge.iconSrc
-                : BADGE_ICON_MAP[badge.id] ?? existing?.icon ?? KNOWN_BADGES[badge.id]?.icon ?? "",
-            link: badge.link ?? existing?.link,
-        });
-    }
-
     const yours: BadgeEntry[] = [];
-    const other: BadgeEntry[] = [];
+    const seen = new Set<string>();
+    const addedIds = new Set(settings.store.addedBadges);
 
-    for (const entry of entries.values()) {
-        const list = ownedIds.has(entry.id) ? yours : other;
-        list.push(entry);
+    for (const badge of getUnfilteredOwnedBadges()) {
+        const entry = runtimeBadgeToEntry(badge);
+        if (!entry || seen.has(entry.id) || addedIds.has(entry.id)) continue;
+        seen.add(entry.id);
+        ownedIds.add(entry.id);
+        yours.push(entry);
+    }
+
+    const userId = getCurrentUserId() ?? "";
+    for (const badge of origGetUserProfile?.(userId)?.badges ?? getRawUserProfile(userId)?.badges ?? []) {
+        const entry = runtimeBadgeToEntry(badge);
+        if (!entry || seen.has(entry.id) || addedIds.has(entry.id)) continue;
+        seen.add(entry.id);
+        ownedIds.add(entry.id);
+        yours.push(entry);
     }
 
     for (const id of ownedIds) {
-        if (entries.has(id)) continue;
-        yours.push({
-            id,
-            description: id.replace(/_/g, " "),
-            icon: "",
-        });
+        if (seen.has(id) || addedIds.has(id)) continue;
+        seen.add(id);
+        const known = KNOWN_BADGES[id];
+        yours.push(known
+            ? { id, ...known }
+            : { id, description: id.replace(/_/g, " "), icon: BADGE_ICON_MAP[id] ?? "" });
     }
 
     yours.sort((a, b) => a.description.localeCompare(b.description));
-    other.sort((a, b) => a.description.localeCompare(b.description));
+
+    const other = Object.entries(KNOWN_BADGES)
+        .filter(([id]) => !ownedIds.has(id))
+        .map(([id, def]) => ({ id, ...def }))
+        .sort((a, b) => a.description.localeCompare(b.description));
 
     return { ownedIds, yours, other };
 }
@@ -725,35 +1114,25 @@ function BadgeRow({ badge, visible, owned, onChange }: {
         : resolveBadgeIcon(badge.id, badge.icon) || badgeIconUrl(badge.icon);
 
     return (
-        <div
-            style={{
-                padding: "4px 8px",
-                borderRadius: 8,
-                background: "var(--background-secondary)",
-            }}
-        >
-            <Checkbox
-                value={visible}
-                onChange={(_, checked) => onChange(checked)}
-                size={20}
-            >
+        <div style={{ ...cardStyle, padding: "8px 12px" }}>
+            <Checkbox value={visible} onChange={(_, checked) => onChange(checked)} size={20}>
                 <div style={{ display: "flex", alignItems: "center", gap: 12, minWidth: 0 }}>
-                    <div
-                        style={{
-                            width: 32,
-                            height: 32,
-                            display: "flex",
-                            alignItems: "center",
-                            justifyContent: "center",
-                            flexShrink: 0,
-                        }}
-                    >
+                    <div style={{
+                        width: 32,
+                        height: 32,
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        flexShrink: 0,
+                        borderRadius: 8,
+                        background: "var(--background-secondary)",
+                    }}>
                         {icon ? (
                             <img
                                 src={icon}
                                 alt=""
-                                width={28}
-                                height={28}
+                                width={24}
+                                height={24}
                                 onError={e => {
                                     const img = e.currentTarget;
                                     if (!img.dataset.fallback) {
@@ -765,33 +1144,136 @@ function BadgeRow({ badge, visible, owned, onChange }: {
                                 }}
                             />
                         ) : (
-                            <div
-                                style={{
-                                    width: 28,
-                                    height: 28,
-                                    borderRadius: 4,
-                                    background: "var(--background-tertiary)",
-                                }}
-                            />
+                            <div style={{ width: 24, height: 24, borderRadius: 4, background: "var(--background-tertiary)" }} />
                         )}
                     </div>
-                    <div style={{ minWidth: 0 }}>
-                        <Text variant="text-md/medium">{badge.description}</Text>
-                    </div>
+                    <Text variant="text-sm/medium" style={{ color: "var(--text-normal)" }}>{badge.description}</Text>
                 </div>
             </Checkbox>
         </div>
     );
 }
 
-function ConnectionsSection() {
-    settings.use(["connectionOverrides"]);
-    const connections = useStateFromStores(
-        [UserProfileStore],
-        () => getRawUserProfile(getCurrentUserId() ?? "")?.connectedAccounts ?? []
+function ProfilePreview({ asTitle }: { asTitle?: boolean }) {
+    settings.use(["customUsername", "hiddenBadges", "addedBadges"]);
+    const user = UserStore.getCurrentUser();
+    const { yours, other } = useStateFromStores(
+        [UserProfileStore, UserStore],
+        () => getModalBadgeLists()
     );
 
+    const handle = settings.store.customUsername.trim() || user?.username || "username";
+    const visible = [
+        ...yours.filter(b => isOwnedBadgeVisible(b.id)),
+        ...other.filter(b => isAddedBadgeVisible(b.id)),
+    ];
+
+    return (
+        <div style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 14,
+            ...(asTitle
+                ? { padding: "4px 0 8px", margin: 0 }
+                : { ...cardStyle, marginBottom: 16 }),
+        }}>
+            <div style={{
+                width: 48, height: 48, borderRadius: "50%",
+                background: "var(--background-tertiary)",
+                backgroundImage: user ? `url(${user.getAvatarURL(undefined, 80, true)})` : undefined,
+                backgroundSize: "cover",
+                flexShrink: 0,
+            }} />
+            <div style={{ flex: 1, minWidth: 0 }}>
+                <Text variant="text-lg/semibold">@{handle}</Text>
+                {visible.length > 0 && (
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginTop: 6 }}>
+                        {visible.map(b => {
+                            const icon = b.icon.startsWith("http")
+                                ? b.icon
+                                : resolveBadgeIcon(b.id, b.icon) || badgeIconUrl(b.icon);
+                            return icon ? <img key={b.id} src={icon} alt="" width={20} height={20} /> : null;
+                        })}
+                    </div>
+                )}
+            </div>
+        </div>
+    );
+}
+
+function ConnectionPlatformIcon({ type, size = 28 }: { type: string; size?: number }) {
+    try {
+        const platform = connectionPlatforms.get(useLegacyPlatformType(type));
+        if (!platform) return null;
+
+        return (
+            <img
+                src={platform.icon.darkSVG}
+                alt={connectionTypeLabel(type)}
+                title={connectionTypeLabel(type)}
+                width={size}
+                height={size}
+                style={{ flexShrink: 0, display: "block" }}
+            />
+        );
+    } catch {
+        return (
+            <div style={{
+                width: size,
+                height: size,
+                borderRadius: 4,
+                background: "var(--background-tertiary)",
+                flexShrink: 0,
+            }} />
+        );
+    }
+}
+
+function ConnectionRow({ type, value, onChange, placeholder, disabled, actionLabel, onAction }: {
+    type: string;
+    value: string;
+    onChange: (v: string) => void;
+    placeholder?: string;
+    disabled?: boolean;
+    actionLabel: string;
+    onAction: () => void;
+}) {
+    return (
+        <div style={connectionRowStyle}>
+            <ConnectionPlatformIcon type={type} />
+            <TextInput
+                value={value}
+                onChange={onChange}
+                placeholder={placeholder}
+                disabled={disabled}
+                style={{ flex: 1, minWidth: 0 }}
+            />
+            <Button size="tiny" variant="secondary" onClick={onAction}>
+                {actionLabel}
+            </Button>
+        </div>
+    );
+}
+
+function ConnectionsSection() {
+    settings.use(["connectionOverrides", "hiddenConnections", "customConnections"]);
+    const [pickType, setPickType] = useState<string | null>(null);
+    const [newName, setNewName] = useState("");
+
+    const realConnections = useStateFromStores(
+        [UserProfileStore],
+        () => getRealConnections()
+    );
     const overrides = settings.store.connectionOverrides;
+    const hidden = settings.store.hiddenConnections;
+    const hiddenSet = new Set(hidden);
+    const custom = settings.store.customConnections;
+
+    const usedTypes = new Set([
+        ...realConnections.filter(c => !hiddenSet.has(connKey(c))).map(c => c.type),
+        ...custom.map(c => c.type),
+    ]);
+    const availableTypes = CONNECTION_TYPE_OPTIONS.filter(o => !usedTypes.has(o.value));
 
     const updateOverride = (key: string, value: string) => {
         const next = { ...overrides };
@@ -801,131 +1283,397 @@ function ConnectionsSection() {
         triggerProfileRefresh();
     };
 
-    if (!connections.length) {
-        return (
-            <section style={{ marginBottom: 20 }}>
-                <Forms.FormTitle tag="h5">Connections</Forms.FormTitle>
-                <Forms.FormText>No linked connections on your profile.</Forms.FormText>
-            </section>
+    const hideRealConnection = (key: string) => {
+        if (hiddenSet.has(key)) return;
+        settings.store.hiddenConnections = [...hidden, key];
+        triggerProfileRefresh();
+    };
+
+    const restoreRealConnection = (key: string) => {
+        settings.store.hiddenConnections = hidden.filter(k => k !== key);
+        triggerProfileRefresh();
+    };
+
+    const updateCustom = (id: string, name: string) => {
+        settings.store.customConnections = custom.map(c =>
+            c.id === id ? { ...c, name: connectionNeedsDomain(c.type) ? normalizeDomain(name) : name } : c
         );
-    }
+        triggerProfileRefresh();
+    };
+
+    const removeCustom = (id: string) => {
+        settings.store.customConnections = custom.filter(c => c.id !== id);
+        triggerProfileRefresh();
+    };
+
+    const addCustom = () => {
+        if (!pickType) return;
+        const name = connectionNeedsDomain(pickType)
+            ? normalizeDomain(newName)
+            : newName.trim();
+        if (!name) {
+            showToast(connectionNeedsDomain(pickType) ? "Enter a domain" : "Enter a handle", Toasts.Type.FAILURE);
+            return;
+        }
+
+        settings.store.customConnections = [...custom, {
+            id: `larp-${pickType}-${Date.now()}`,
+            type: pickType,
+            name,
+        }];
+
+        setPickType(null);
+        setNewName("");
+        triggerProfileRefresh();
+    };
+
+    const activeReal = realConnections.filter(c => !hiddenSet.has(connKey(c)));
+    const hiddenReal = realConnections.filter(c => hiddenSet.has(connKey(c)));
 
     return (
-        <section style={{ marginBottom: 20 }}>
-            <Forms.FormTitle tag="h5">Connections</Forms.FormTitle>
-            <Forms.FormText>Spoof connection display name</Forms.FormText>
-            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-                {connections.map(connection => {
-                    const key = connKey(connection);
-                    const override = overrides[key] ?? overrides[connection.type];
-                    return (
-                        <div
-                            key={key}
-                            style={{
-                                padding: 10,
-                                borderRadius: 8,
-                                background: "var(--background-secondary)",
-                            }}
-                        >
-                            <Text variant="text-sm/medium" style={{ marginBottom: 6 }}>
-                                {connection.type} — {connection.name}
-                            </Text>
-                            <TextInput
-                                value={override?.name ?? connection.name}
-                                onChange={v => updateOverride(key, v)}
-                                placeholder="Display name"
-                            />
-                        </div>
-                    );
-                })}
-            </div>
-        </section>
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {!activeReal.length && !custom.length && !hiddenReal.length && (
+                <Forms.FormText style={{ margin: 0, color: "var(--text-muted)" }}>
+                    No linked accounts on your profile.
+                </Forms.FormText>
+            )}
+
+            {activeReal.map(connection => {
+                const key = connKey(connection);
+                const override = overrides[key] ?? overrides[connection.type];
+                return (
+                    <ConnectionRow
+                        key={key}
+                        type={connection.type}
+                        value={override?.name ?? connection.name}
+                        onChange={v => updateOverride(key, v)}
+                        placeholder={connection.name}
+                        actionLabel="Remove"
+                        onAction={() => hideRealConnection(key)}
+                    />
+                );
+            })}
+
+            {custom.map(cc => (
+                <ConnectionRow
+                    key={cc.id}
+                    type={cc.type}
+                    value={cc.name}
+                    onChange={v => updateCustom(cc.id, v)}
+                    placeholder={connectionNeedsDomain(cc.type) ? "example.com" : "Handle"}
+                    actionLabel="Remove"
+                    onAction={() => removeCustom(cc.id)}
+                />
+            ))}
+
+            {availableTypes.length > 0 && (
+                <div style={{ ...connectionRowStyle, flexWrap: "wrap" }}>
+                    {pickType ? (
+                        <ConnectionPlatformIcon type={pickType} size={24} />
+                    ) : (
+                        <div style={{ width: 24, flexShrink: 0 }} />
+                    )}
+                    <div style={{ flex: 1, minWidth: 120 }}>
+                        <SearchableSelect
+                            options={availableTypes}
+                            value={pickType}
+                            onChange={setPickType}
+                            placeholder="Add connection..."
+                            closeOnSelect
+                        />
+                    </div>
+                    {pickType && (
+                        <TextInput
+                            value={newName}
+                            onChange={setNewName}
+                            placeholder={connectionNeedsDomain(pickType) ? "example.com" : "Handle"}
+                            style={{ flex: 1, minWidth: 100 }}
+                        />
+                    )}
+                    <Button
+                        size="tiny"
+                        variant="secondary"
+                        disabled={!pickType || !newName.trim()}
+                        onClick={addCustom}
+                    >
+                        Add
+                    </Button>
+                </div>
+            )}
+
+            {hiddenReal.length > 0 && (
+                <div style={{ display: "flex", flexDirection: "column", gap: 4, marginTop: 2 }}>
+                    {hiddenReal.map(connection => {
+                        const key = connKey(connection);
+                        return (
+                            <div
+                                key={key}
+                                style={{ display: "flex", alignItems: "center", gap: 8, padding: "2px 10px", opacity: 0.55 }}
+                            >
+                                <ConnectionPlatformIcon type={connection.type} size={20} />
+                                <Text variant="text-xs/normal" style={{ color: "var(--text-muted)", flex: 1 }}>
+                                    Hidden
+                                </Text>
+                                <Button size="tiny" variant="secondary" onClick={() => restoreRealConnection(key)}>
+                                    Restore
+                                </Button>
+                            </div>
+                        );
+                    })}
+                </div>
+            )}
+        </div>
     );
 }
 
-function BadgeSection({ title, badges, owned }: {
+function BadgeSection({ title, badges, owned, search }: {
     title: string;
     badges: BadgeEntry[];
     owned: boolean;
+    search?: string;
 }) {
-    if (!badges.length) return null;
+    const q = search?.trim().toLowerCase();
+    const filtered = q
+        ? badges.filter(b => b.description.toLowerCase().includes(q) || b.id.toLowerCase().includes(q))
+        : badges;
+
+    if (!badges.length) {
+        if (!owned) return null;
+        return (
+            <div style={{ marginBottom: 24 }}>
+                <div style={sectionTitleStyle}>{title}</div>
+                <Forms.FormText style={{ margin: 0, color: "var(--text-muted)" }}>
+                    Loading your badges… try reopening if this stays empty.
+                </Forms.FormText>
+            </div>
+        );
+    }
+
+    const countLabel = filtered.length !== badges.length
+        ? `${filtered.length}/${badges.length}`
+        : String(badges.length);
 
     return (
-        <section style={{ marginBottom: 20 }}>
-            <Forms.FormTitle tag="h5">{title}</Forms.FormTitle>
-            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                {badges.map(badge => (
-                    <BadgeRow
-                        key={badge.id}
-                        badge={badge}
-                        owned={owned}
-                        visible={owned ? isOwnedBadgeVisible(badge.id) : isAddedBadgeVisible(badge.id)}
-                        onChange={visible => {
-                            if (owned) setOwnedBadgeVisible(badge.id, visible);
-                            else setAddedBadgeVisible(badge.id, visible);
-                        }}
-                    />
-                ))}
+        <div style={{ marginBottom: 24 }}>
+            <div style={sectionTitleStyle}>
+                {title}
+                <span style={{ marginLeft: 8, opacity: 0.55, fontWeight: 600 }}>{countLabel}</span>
             </div>
-        </section>
+            {!filtered.length ? (
+                <Forms.FormText style={{ margin: 0, color: "var(--text-muted)" }}>No badges match your search.</Forms.FormText>
+            ) : (
+                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                    {filtered.map(badge => (
+                        <BadgeRow
+                            key={badge.id}
+                            badge={badge}
+                            owned={owned}
+                            visible={owned ? isOwnedBadgeVisible(badge.id) : isAddedBadgeVisible(badge.id)}
+                            onChange={visible => {
+                                if (owned) setOwnedBadgeVisible(badge.id, visible);
+                                else setAddedBadgeVisible(badge.id, visible);
+                            }}
+                        />
+                    ))}
+                </div>
+            )}
+        </div>
+    );
+}
+
+function ConfigSection() {
+    const [importText, setImportText] = useState("");
+    const fileRef = useRef<HTMLInputElement>(null);
+
+    const exportJson = () => copyWithToast(
+        JSON.stringify(getLarpExportData(), null, 2),
+        "Config copied"
+    );
+
+    const downloadJson = () => {
+        const data = getLarpExportData();
+        const name = settings.store.customUsername.trim() || "config";
+        const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `larp-${name}.json`;
+        a.click();
+        URL.revokeObjectURL(url);
+        showToast("Config downloaded", Toasts.Type.SUCCESS);
+    };
+
+    const doImport = (raw: string) => {
+        const data = parseLarpImport(raw);
+        if (!data) {
+            showToast("Invalid config JSON", Toasts.Type.FAILURE);
+            return;
+        }
+        applyLarpExportData(data);
+        setImportText("");
+        showToast("Config applied", Toasts.Type.SUCCESS);
+    };
+
+    return (
+        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+            <div style={connectionRowStyle}>
+                <Text variant="text-xs/medium" style={{ color: "var(--text-muted)", flex: 1 }}>Export config</Text>
+                <Button size="tiny" variant="secondary" onClick={exportJson}>Copy</Button>
+                <Button size="tiny" variant="secondary" onClick={downloadJson}>Save</Button>
+            </div>
+
+            <div style={{ ...cardStyle, padding: 12 }}>
+                <TextInput
+                    value={importText}
+                    onChange={setImportText}
+                    placeholder="Paste config JSON..."
+                    style={{ fontFamily: "var(--font-code)", marginBottom: 8 }}
+                />
+                <input
+                    ref={fileRef}
+                    type="file"
+                    accept=".json,application/json"
+                    style={{ display: "none" }}
+                    onChange={e => {
+                        const file = e.target.files?.[0];
+                        if (!file) return;
+                        const reader = new FileReader();
+                        reader.onload = () => doImport(String(reader.result ?? ""));
+                        reader.readAsText(file);
+                        e.target.value = "";
+                    }}
+                />
+                <div style={{ display: "flex", gap: 8 }}>
+                    <Button
+                        size="tiny"
+                        variant="secondary"
+                        disabled={!importText.trim()}
+                        onClick={() => doImport(importText)}
+                    >
+                        Apply
+                    </Button>
+                    <Button size="tiny" variant="secondary" onClick={() => fileRef.current?.click()}>
+                        Browse
+                    </Button>
+                </div>
+            </div>
+        </div>
     );
 }
 
 const BadgeModal = ErrorBoundary.wrap(function BadgeModal(props: RenderModalProps) {
+    const [tab, setTab] = useState<number>(ModalTabs.Username);
+    const [search, setSearch] = useState("");
+    const [profileReady, setProfileReady] = useState(false);
+
+    useEffect(() => {
+        let alive = true;
+        void refreshOwnProfile().finally(() => {
+            if (alive) setProfileReady(true);
+        });
+        return () => { alive = false; };
+    }, []);
+
     settings.use([
         "customUsername",
         "hiddenBadges",
         "addedBadges",
         "connectionOverrides",
+        "hiddenConnections",
+        "customConnections",
     ]);
+    void profileReady;
     const { yours, other } = useStateFromStores(
         [UserProfileStore, UserStore],
         () => getModalBadgeLists()
     );
 
-    const handleUsernameChange = (value: string) => {
-        settings.store.customUsername = value;
-        triggerProfileRefresh();
-    };
-
-    const handleReset = () => {
-        settings.store.hiddenBadges = [];
-        settings.store.addedBadges = [];
-        settings.store.customUsername = "";
-        settings.store.connectionOverrides = {};
-        updateHiddenBadgeStyles();
-        triggerProfileRefresh();
-    };
-
     return (
         <Modal
             {...props}
-            title="Larp Tool"
+            title={<ProfilePreview asTitle />}
             size="lg"
             actions={[
-                { text: "Reset", variant: "secondary", onClick: handleReset },
+                { text: "Reset", variant: "secondary", onClick: resetLarpConfig },
                 { text: "Close", variant: "primary", onClick: props.onClose },
             ]}
         >
-            <ScrollerThin style={{ maxHeight: "70vh" }}>
-                <div style={{ padding: "4px 12px 12px" }}>
-                    <section style={{ marginBottom: 20 }}>
-                        <Forms.FormTitle tag="h5">Custom Handle</Forms.FormTitle>
-                        <Forms.FormText>Change your custom @username handle</Forms.FormText>
-                        <TextInput
-                            value={settings.store.customUsername}
-                            onChange={handleUsernameChange}
-                            placeholder="Your @username"
-                            maxLength={32}
-                        />
-                    </section>
+            <div style={{ padding: "0 16px 6px" }}>
+                <TabBar
+                    type="top"
+                    look="brand"
+                    selectedItem={tab}
+                    onItemSelect={setTab}
+                    style={{ marginBottom: 14 }}
+                >
+                    <TabBar.Item id={ModalTabs.Username}>Username</TabBar.Item>
+                    <TabBar.Item id={ModalTabs.Badges}>Badges</TabBar.Item>
+                    <TabBar.Item id={ModalTabs.Connections}>Connections</TabBar.Item>
+                    <TabBar.Item id={ModalTabs.Data}>Config</TabBar.Item>
+                </TabBar>
 
-                    <ConnectionsSection />
+                <ScrollerThin style={{ maxHeight: "48vh", paddingTop: 2 }}>
+                    {tab === ModalTabs.Username && (
+                        <div style={cardStyle}>
+                            <Text variant="text-xs/medium" style={{ ...sectionTitleStyle, marginBottom: 8 }}>
+                                Custom username
+                            </Text>
+                            <TextInput
+                                value={settings.store.customUsername}
+                                onChange={v => {
+                                    settings.store.customUsername = v;
+                                    triggerProfileRefresh();
+                                }}
+                                placeholder="Your @username"
+                                maxLength={32}
+                            />
+                        </div>
+                    )}
 
-                    <BadgeSection title="Your Badges" badges={yours} owned />
-                    <BadgeSection title="Add Badges" badges={other} owned={false} />
-                </div>
-            </ScrollerThin>
+                    {tab === ModalTabs.Badges && (
+                        <div>
+                            <div style={{
+                                marginBottom: 28,
+                                paddingBottom: 20,
+                                borderBottom: "1px solid var(--background-modifier-accent)",
+                            }}>
+                                <TextInput
+                                    value={search}
+                                    onChange={setSearch}
+                                    placeholder="Search badges..."
+                                />
+                            </div>
+                            <BadgeSection title="Your Badges" badges={yours} owned search={search} />
+                            <BadgeSection title="Add Badges" badges={other} owned={false} search={search} />
+                        </div>
+                    )}
+
+                    {tab === ModalTabs.Connections && <ConnectionsSection />}
+
+                    {tab === ModalTabs.Data && <ConfigSection />}
+                </ScrollerThin>
+
+                <a
+                    href="https://github.com/sp5-y/discord-larp-plugin"
+                    target="_blank"
+                    rel="noreferrer noopener"
+                    style={{
+                        display: "block",
+                        textAlign: "center",
+                        marginTop: 8,
+                        color: "var(--text-muted)",
+                        opacity: 0.45,
+                        fontSize: 12,
+                        lineHeight: "16px",
+                        textDecoration: "none",
+                        cursor: "pointer",
+                    }}
+                    onMouseEnter={e => { e.currentTarget.style.textDecoration = "underline"; }}
+                    onMouseLeave={e => { e.currentTarget.style.textDecoration = "none"; }}
+                >
+                    made by: sp5
+                </a>
+            </div>
         </Modal>
     );
 }, { noop: true });
@@ -1004,29 +1752,26 @@ function patchDisplayProfileUtils() {
     });
 }
 
+function wrapOwnUserProfile(profile: NonNullable<ReturnType<typeof UserProfileStore.getUserProfile>>, userId: string) {
+    const cached = wrappedProfileCache.get(profile);
+    if (cached?.gen === profileWrapGeneration) return cached.value;
+
+    const wrapped = Object.assign(Object.create(Object.getPrototypeOf(profile)), profile, {
+        badges: profile.badges?.length ? filterBadges({ userId }, profile.badges) : profile.badges,
+        connectedAccounts: applyLarpConnections(profile.connectedAccounts),
+    });
+
+    wrappedProfileCache.set(profile, { gen: profileWrapGeneration, value: wrapped });
+    return wrapped;
+}
+
 function patchUserProfileStore() {
     origGetUserProfile = UserProfileStore.getUserProfile.bind(UserProfileStore);
 
     UserProfileStore.getUserProfile = (userId: string) => {
         const profile = origGetUserProfile(userId);
         if (!profile || userId !== getCurrentUserId() || !settings.store.enabled) return profile;
-
-        const filtered = profile.badges?.length
-            ? filterBadges({ userId }, profile.badges)
-            : profile.badges;
-        const connections = applyConnectionOverrides(profile.connectedAccounts);
-
-        const badgesChanged = filtered && profile.badges && filtered.length !== profile.badges.length;
-        const connectionsChanged = connections !== profile.connectedAccounts;
-
-        if (!badgesChanged && !connectionsChanged) return profile;
-
-        const wrapped = Object.create(Object.getPrototypeOf(profile));
-        Object.assign(wrapped, profile, {
-            ...(badgesChanged ? { badges: filtered } : {}),
-            ...(connectionsChanged ? { connectedAccounts: connections } : {}),
-        });
-        return wrapped;
+        return wrapOwnUserProfile(profile, userId);
     };
 
     unpatchFns.push(() => {
@@ -1036,11 +1781,14 @@ function patchUserProfileStore() {
 
 function patchProfileDomScope() {
     const markOwnProfileNodes = () => {
+        if (!settings.store.enabled || !settings.store.hiddenBadges.length) return;
+
         const userId = getCurrentUserId();
         if (!userId) return;
 
+        const real = getRealUsername();
         for (const el of document.querySelectorAll(`[aria-label$=" profile popout"], [class*="userPopout"]`)) {
-            if (el.querySelector(`[href="/users/${userId}"]`) || el.textContent?.includes(UserStore.getCurrentUser()?.username ?? "")) {
+            if (el.querySelector(`[href="/users/${userId}"]`) || (real && el.textContent?.includes(real))) {
                 (el as HTMLElement).dataset.larpUser = userId;
             }
         }
@@ -1049,11 +1797,121 @@ function patchProfileDomScope() {
         if (accountPanel) (accountPanel as HTMLElement).dataset.larpUser = userId;
     };
 
-    const observer = new MutationObserver(markOwnProfileNodes);
+    let scheduled = false;
+    let rafId = 0;
+    const scheduleMark = () => {
+        if (scheduled) return;
+        scheduled = true;
+        rafId = requestAnimationFrame(() => {
+            scheduled = false;
+            markOwnProfileNodes();
+        });
+    };
+
+    const observer = new MutationObserver(scheduleMark);
     observer.observe(document.body, { childList: true, subtree: true });
     markOwnProfileNodes();
 
-    unpatchFns.push(() => observer.disconnect());
+    unpatchFns.push(() => {
+        observer.disconnect();
+        cancelAnimationFrame(rafId);
+    });
+}
+
+function patchParser() {
+    origParserParse = Parser.parse.bind(Parser);
+    Parser.parse = ((content: unknown, ...args: unknown[]) => {
+        if (typeof content !== "string") {
+            return origParserParse(content as string, ...args);
+        }
+        if (!usernameSwapCtx.active || !content.includes(usernameSwapCtx.real)) {
+            return origParserParse(content, ...args);
+        }
+        return origParserParse(swapRealUsernameInText(content), ...args);
+    }) as typeof Parser.parse;
+
+    unpatchFns.push(() => {
+        Parser.parse = origParserParse;
+    });
+}
+
+function wrapMessageCollection(collection: ReturnType<typeof MessageStore.getMessages>) {
+    if (!collection || !usernameSwapCtx.active) return collection;
+
+    const cachedProxy = messageCollectionProxyCache.get(collection);
+    if (cachedProxy) return cachedProxy;
+
+    let cachedArray: Message[] | null = null;
+    let cachedSource: Message[] | null = null;
+    let arrayGen = messageCollectionGeneration;
+
+    const proxy = new Proxy(collection, {
+        get(target, prop, receiver) {
+            if (prop === "__larpWrapped") return true;
+            if (prop === "_array") {
+                const source = Reflect.get(target, "_array", receiver) as Message[];
+                if (arrayGen === messageCollectionGeneration && cachedSource === source && cachedArray) {
+                    return cachedArray;
+                }
+                cachedArray = source.map(m => wrapMessageForDisplay(m)!);
+                cachedSource = source;
+                arrayGen = messageCollectionGeneration;
+                return cachedArray;
+            }
+            const value = Reflect.get(target, prop, receiver);
+            if (prop === "get" && typeof value === "function") {
+                return (id: string) => wrapMessageForDisplay(value.call(target, id));
+            }
+            return value;
+        },
+    }) as ReturnType<typeof MessageStore.getMessages>;
+
+    messageCollectionProxyCache.set(collection, proxy);
+    return proxy;
+}
+
+function patchMessageStore() {
+    origGetMessage = MessageStore.getMessage.bind(MessageStore);
+    origGetMessages = MessageStore.getMessages.bind(MessageStore);
+
+    MessageStore.getMessage = (channelId, messageId) => {
+        const message = origGetMessage(channelId, messageId);
+        if (!usernameSwapCtx.active) return message!;
+        return wrapMessageForDisplay(message)!;
+    };
+
+    MessageStore.getMessages = channelId => {
+        const collection = origGetMessages(channelId);
+        if (!usernameSwapCtx.active) return collection;
+        return wrapMessageCollection(collection);
+    };
+
+    unpatchFns.push(() => {
+        MessageStore.getMessage = origGetMessage;
+        MessageStore.getMessages = origGetMessages;
+    });
+}
+
+function patchUserStore() {
+    origGetCurrentUser = UserStore.getCurrentUser.bind(UserStore);
+    origGetUser = UserStore.getUser.bind(UserStore);
+
+    UserStore.getCurrentUser = () => {
+        const user = origGetCurrentUser();
+        if (!user || !settings.store.enabled) return user;
+        return withCustomUsernameOnly(user) ?? user;
+    };
+
+    UserStore.getUser = (userId: string) => {
+        const user = origGetUser(userId);
+        if (!user || !settings.store.enabled) return user;
+        return withCustomUsernameOnly(user) ?? user;
+    };
+
+    unpatchFns.push(() => {
+        UserStore.getCurrentUser = origGetCurrentUser;
+        UserStore.getUser = origGetUser;
+    });
 }
 
 function patchAccountSettingsStore(AccountStore: {
@@ -1168,16 +2026,27 @@ export default definePlugin({
                 replace: "username:$self.getAccountSettingsUsername(e)"
             }
         },
+        {
+            find: "#{intl::ACCOUNT_USERNAME}",
+            replacement: {
+                match: /(?<=children:)(\i)\.username/,
+                replace: "$self.getAccountSettingsUsername($1)"
+            }
+        },
     ],
 
     withCustomUsernameOnly,
     filterBadges,
     getCurrentUserId,
     getAccountSettingsUsername,
-
+    getRealUsername,
+    swapRealUsernameInText,
+    wrapMessageForDisplay,
+    mapEmbed,
     getBadgeIconSrc(badge: { userId?: string; id?: string; key?: string; icon?: string; iconSrc?: string; }) {
         const transparent = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7";
-        if (settings.store.enabled && (!badge.userId || badge.userId === getCurrentUserId()) && isBadgeHiddenObject(badge)) {
+        const ownerId = badge.userId ?? badgeProfileUserId;
+        if (settings.store.enabled && ownerId === getCurrentUserId() && isBadgeHiddenObject(badge)) {
             return transparent;
         }
         if (badge.iconSrc) return badge.iconSrc;
@@ -1200,6 +2069,9 @@ export default definePlugin({
 
     start() {
         document.addEventListener("keydown", handleKeyDown, true);
+        try { patchUserStore(); } catch (e) { console.warn("larp: user store patch", e); }
+        try { patchMessageStore(); } catch (e) { console.warn("larp: message store patch", e); }
+        try { patchParser(); } catch (e) { console.warn("larp: parser patch", e); }
         refreshCachedUsername();
         FluxDispatcher.subscribe("USER_UPDATE", refreshCachedUsername);
         unpatchFns.push(() => FluxDispatcher.unsubscribe("USER_UPDATE", refreshCachedUsername));
