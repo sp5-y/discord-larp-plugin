@@ -28,25 +28,9 @@ Clone this repo, then run:
 auto-setup.bat
 ```
 
-This will:
+Restart Discord fully. Press **CTRL + B** inside of discord to open the tool
 
-1. Clone/update Vencord to `%LOCALAPPDATA%\Vencord-custom`
-2. Copy `larp/index.tsx` into `src/userplugins/larp/`
-3. Run `pnpm install` and `pnpm build`
-4. Patch Discord automatically
-
-Restart Discord fully. **Larp Tool** is enabled by default — if you turned it off before, re-enable it under **Vencord Settings → Plugins**.
-
-### Script commands
-
-| Command | Description |
-|---|---|
-| `auto-setup.bat` | Full first-time setup |
-| `auto-setup.bat rebuild` | Copy plugin + rebuild after edits |
-| `auto-setup.bat inject` | Rebuild + re-patch Discord |
-| `auto-setup.bat help` | Show all options |
-
-**Optional environment variables:**
+**Optional .bat setup variables:**
 
 ```bat
 set DISCORD_BRANCH=stable          :: auto | stable | ptb | canary
@@ -54,13 +38,6 @@ set DISCORD_LOCATION=C:\path\to\Discord
 set VENCORD_DIR=C:\path\to\Vencord
 set NOINJECT=1                     :: build only, skip patching Discord
 auto-setup.bat
-```
-
-After editing `larp/index.tsx`:
-
-```bat
-auto-setup.bat rebuild
-auto-setup.bat inject
 ```
 
 ## Manual setup
@@ -71,11 +48,9 @@ Follow the [Vencord custom plugins guide](https://docs.vencord.dev/installing/cu
 2. Create `src/userplugins/larp/` in your Vencord folder
 3. Copy `larp/index.tsx` into that folder
 4. Run `pnpm build` and patch Discord (`pnpm inject` or the installer script)
-5. Restart Discord and enable **Larp Tool**
+5. Restart Discord fully. Press **CTRL + B** inside of discord to open the tool
 
 ## Usage
-
-Press **Ctrl+B** or click **Open Larp Tool** in plugin settings.
 
 | Tab | What it does |
 |---|---|
