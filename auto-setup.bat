@@ -209,10 +209,16 @@ if not defined KEEP_DISCORD_OPEN (
 )
 pushd "%VENCORD_DIR%"
 if defined DISCORD_LOCATION (
-    echo      location: %DISCORD_LOCATION%
+    echo      target: %DISCORD_LOCATION%
+    echo [..] unpatching existing Vencord install (if any)...
+    call node scripts/runInstaller.mjs -- --uninstall --location "%DISCORD_LOCATION%"
+    echo [..] installing custom build...
     call node scripts/runInstaller.mjs -- --install --location "%DISCORD_LOCATION%"
 ) else (
     echo      branch: %DISCORD_BRANCH%
+    echo [..] unpatching existing Vencord install (if any)...
+    call node scripts/runInstaller.mjs -- --uninstall --branch %DISCORD_BRANCH%
+    echo [..] installing custom build...
     call node scripts/runInstaller.mjs -- --install --branch %DISCORD_BRANCH%
 )
 set "ERR=!ERRORLEVEL!"
