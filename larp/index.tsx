@@ -178,14 +178,13 @@ const BADGE_ICON_MAP: Record<string, string> = {
     quest_completed: "quest.png",
     quest: "quest.png",
     legacy_username: "username.png",
-    supports_commands: "supportscommands.svg",
     automod: "automod.svg",
     orb: "orb.svg",
     ...Object.fromEntries(NITRO_TIERS.map(t => [`premium_${t}`, `subscriptions/badges/${t}.png`])),
     ...Object.fromEntries(GIFTING_TIERS.map(t => [`gifting_${t}`, `gifting/${t}.png`])),
     ...Object.fromEntries(Array.from({ length: 9 }, (_, i) => [
         `guild_booster_lvl${i + 1}`,
-        `boosts/discordboost${i + 1}.svg`,
+        `boosts/discord-boost-${i + 1}.svg`,
     ])),
 };
 
@@ -211,19 +210,18 @@ const KNOWN_BADGES: Record<string, { description: string; icon: string; link?: s
     premium_emerald: { description: "Nitro Emerald", icon: "subscriptions/badges/emerald.png", link: "https://discord.com/settings/premium" },
     premium_ruby: { description: "Nitro Ruby", icon: "subscriptions/badges/ruby.png", link: "https://discord.com/settings/premium" },
     premium_opal: { description: "Nitro Opal", icon: "subscriptions/badges/opal.png", link: "https://discord.com/settings/premium" },
-    guild_booster_lvl1: { description: "Server Booster (1 month)", icon: "boosts/discordboost1.svg", link: "https://discord.com/settings/premium" },
-    guild_booster_lvl2: { description: "Server Booster (2 months)", icon: "boosts/discordboost2.svg", link: "https://discord.com/settings/premium" },
-    guild_booster_lvl3: { description: "Server Booster (3 months)", icon: "boosts/discordboost3.svg", link: "https://discord.com/settings/premium" },
-    guild_booster_lvl4: { description: "Server Booster (6 months)", icon: "boosts/discordboost4.svg", link: "https://discord.com/settings/premium" },
-    guild_booster_lvl5: { description: "Server Booster (9 months)", icon: "boosts/discordboost5.svg", link: "https://discord.com/settings/premium" },
-    guild_booster_lvl6: { description: "Server Booster (12 months)", icon: "boosts/discordboost6.svg", link: "https://discord.com/settings/premium" },
-    guild_booster_lvl7: { description: "Server Booster (15 months)", icon: "boosts/discordboost7.svg", link: "https://discord.com/settings/premium" },
-    guild_booster_lvl8: { description: "Server Booster (18 months)", icon: "boosts/discordboost8.svg", link: "https://discord.com/settings/premium" },
-    guild_booster_lvl9: { description: "Server Booster (24+ months)", icon: "boosts/discordboost9.svg", link: "https://discord.com/settings/premium" },
+    guild_booster_lvl1: { description: "Server Booster (1 month)", icon: "boosts/discord-boost-1.svg", link: "https://discord.com/settings/premium" },
+    guild_booster_lvl2: { description: "Server Booster (2 months)", icon: "boosts/discord-boost-2.svg", link: "https://discord.com/settings/premium" },
+    guild_booster_lvl3: { description: "Server Booster (3 months)", icon: "boosts/discord-boost-3.svg", link: "https://discord.com/settings/premium" },
+    guild_booster_lvl4: { description: "Server Booster (6 months)", icon: "boosts/discord-boost-4.svg", link: "https://discord.com/settings/premium" },
+    guild_booster_lvl5: { description: "Server Booster (9 months)", icon: "boosts/discord-boost-5.svg", link: "https://discord.com/settings/premium" },
+    guild_booster_lvl6: { description: "Server Booster (12 months)", icon: "boosts/discord-boost-6.svg", link: "https://discord.com/settings/premium" },
+    guild_booster_lvl7: { description: "Server Booster (15 months)", icon: "boosts/discord-boost-7.svg", link: "https://discord.com/settings/premium" },
+    guild_booster_lvl8: { description: "Server Booster (18 months)", icon: "boosts/discord-boost-8.svg", link: "https://discord.com/settings/premium" },
+    guild_booster_lvl9: { description: "Server Booster (24+ months)", icon: "boosts/discord-boost-9.svg", link: "https://discord.com/settings/premium" },
     quest_completed: { description: "Quest Completed", icon: "quest.png" },
     quest: { description: "Quest Completed", icon: "quest.png" },
     legacy_username: { description: "Legacy Username Badge", icon: "username.png" },
-    supports_commands: { description: "Supports Commands", icon: "supportscommands.svg" },
     automod: { description: "AutoMod", icon: "automod.svg" },
     orb: { description: "Orb", icon: "orb.svg" },
     ...Object.fromEntries(GIFTING_TIERS.map(t => [`gifting_${t}`, {
@@ -1668,7 +1666,7 @@ function buildBadgeImageCandidates(id: string, fallbackIcon?: string) {
     pushMapped(BADGE_ICON_MAP[id] ?? BADGE_ICON_MAP[catalogId]);
 
     const boost = catalogId.match(/^guild_booster_lvl(\d+)$/);
-    if (boost) pushMapped(`boosts/discordboost${boost[1]}.svg`);
+    if (boost) pushMapped(`boosts/discord-boost-${boost[1]}.svg`);
 
     const nitro = catalogId.match(/^premium_(bronze|silver|gold|platinum|diamond|emerald|ruby|opal)$/);
     if (nitro) pushMapped(`subscriptions/badges/${nitro[1]}.png`);
@@ -3879,18 +3877,18 @@ const BadgeModal = ErrorBoundary.wrap(function BadgeModal(props: RenderModalProp
             size="lg"
             actions={[
                 {
-                    text: "Close",
-                    variant: "secondary",
-                    onClick: props.onClose,
-                },
-                {
                     text: "Reset",
-                    variant: "primary",
+                    variant: "secondary",
                     onClick: () => {
                         if (!confirm("Reset all larp settings? This clears your username, badges, decorations, and connections.")) return;
                         resetLarpConfig();
                         showToast("All settings reset", Toasts.Type.SUCCESS);
                     },
+                },
+                {
+                    text: "Close",
+                    variant: "primary",
+                    onClick: props.onClose,
                 },
             ]}
         >
