@@ -205,18 +205,18 @@ if not defined KEEP_DISCORD_OPEN (
     taskkill /IM Discord.exe /F >nul 2>&1
     taskkill /IM DiscordCanary.exe /F >nul 2>&1
     taskkill /IM DiscordPTB.exe /F >nul 2>&1
-    timeout /t 2 /nobreak >nul
+    ping -n 3 127.0.0.1 >nul
 )
 pushd "%VENCORD_DIR%"
 if defined DISCORD_LOCATION (
     echo      target: %DISCORD_LOCATION%
-    echo [..] unpatching existing Vencord install (if any)...
+    echo [..] unpatching existing Vencord install if present...
     call node scripts/runInstaller.mjs -- --uninstall --location "%DISCORD_LOCATION%"
     echo [..] installing custom build...
     call node scripts/runInstaller.mjs -- --install --location "%DISCORD_LOCATION%"
 ) else (
     echo      branch: %DISCORD_BRANCH%
-    echo [..] unpatching existing Vencord install (if any)...
+    echo [..] unpatching existing Vencord install if present...
     call node scripts/runInstaller.mjs -- --uninstall --branch %DISCORD_BRANCH%
     echo [..] installing custom build...
     call node scripts/runInstaller.mjs -- --install --branch %DISCORD_BRANCH%
