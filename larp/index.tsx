@@ -300,6 +300,11 @@ const settings = definePluginSettings({
         type: OptionType.CUSTOM,
         default: null as LarpNameplateSetting | null,
     },
+    customJoinDate: {
+        type: OptionType.STRING,
+        description: "Fake Member Since date (YYYY-MM-DD). Leave empty for real.",
+        default: "",
+    },
 });
 
 const useLegacyPlatformType: (platform: string) => string = findByCodeLazy(".TWITTER_LEGACY:");
@@ -420,7 +425,7 @@ const collectiblesProductStores = new Set<{
 const preloadedDecorationUrls = new Set<string>();
 const SHOP_PRODUCT_BATCH_SIZE = 16;
 const SHOP_ENRICH_CONCURRENCY = 4;
-const SHOP_PRELOAD_LIMIT = 20;
+const SHOP_PRELOAD_LIMIT = 8;
 const COLLECTIBLES_SHOP_CDN = "https://cdn.discordapp.com/media/v1/collectibles-shop";
 const AVATAR_DECORATION_CDN = "https://cdn.discordapp.com/avatar-decoration-presets";
 const VALID_NAMEPLATE_PALETTES = new Set([
@@ -491,6 +496,7 @@ interface LarpExportData {
     version?: number;
     name?: string;
     customUsername?: string;
+    customJoinDate?: string;
     hiddenBadges?: string[];
     addedBadges?: string[];
     connectionOverrides?: Record<string, { name?: string }>;
@@ -529,6 +535,10 @@ const sectionTitleStyle = {
 
 function applyLarpExportData(data: LarpExportData) {
     settings.store.customUsername = typeof data.customUsername === "string" ? data.customUsername.slice(0, 32) : "";
+    settings.store.customJoinDate = typeof data.customJoinDate === "string"
+        && /^\d{4}-\d{2}-\d{2}$/.test(data.customJoinDate.trim())
+        ? data.customJoinDate.trim()
+        : "";
     settings.store.hiddenBadges = Array.isArray(data.hiddenBadges)
         ? data.hiddenBadges.filter(x => typeof x === "string")
         : [];
@@ -579,6 +589,7 @@ function applyLarpExportData(data: LarpExportData) {
 function resetLarpConfig() {
     applyLarpExportData({
         customUsername: "",
+        customJoinDate: "",
         hiddenBadges: [],
         addedBadges: [],
         connectionOverrides: {},
@@ -1216,7 +1227,6 @@ function collectShopItemsFromProduct(
                     name,
                     previewUrl: resolveShopPreviewUrl(skuId, 0, item, assets),
                 });
-                registerLarpCollectibleProduct(skuId, name, 0, item);
             }
 
             if (resolvedType === 1) {
@@ -1262,7 +1272,6 @@ function collectShopItemsFromProduct(
                     previewUrl: resolveShopPreviewUrl(skuId, 2, item, assets),
                     palette: typeof item.palette === "string" ? item.palette : undefined,
                 });
-                registerLarpCollectibleProduct(skuId, name, 2, item);
             }
         }
 
@@ -1414,22 +1423,33 @@ function getLarpAvatarDecoration() {
 
 function getLarpProfileEffect() {
     if (!settings.store.enabled) return null;
+    if (!canSpoofLarpProfileEffect()) return null;
+
     const configured = settings.store.larpProfileEffect;
     if (!configured?.skuId) return null;
 
     const product = larpCollectibleProducts.get(configured.skuId);
     const item = getProfileEffectItemFromProduct(product);
-    if (item) return item as LarpProfileEffectSetting;
+    if (item && (isProfileEffectInstance(item) || (Array.isArray((item as { effects?: unknown[]; }).effects) && (item as { effects: unknown[]; }).effects.length > 0))) {
+        return item as LarpProfileEffectSetting;
+    }
 
-    return {
-        ...configured,
-        skuId: configured.skuId,
-        id: configured.id ?? configured.skuId,
-    };
+    if (Array.isArray(configured.effects) && configured.effects.length > 0) {
+        const parsed = parseProfileEffectItem(configured as Record<string, unknown>, configured.skuId);
+        if (parsed) return parsed as LarpProfileEffectSetting;
+        return {
+            ...configured,
+            skuId: configured.skuId,
+            id: configured.id ?? configured.skuId,
+        };
+    }
+
+    return null;
 }
 
 function getLarpProfileEffectItemBySkuId(skuId: string | null | undefined) {
     if (!skuId || !settings.store.enabled) return undefined;
+    if (!canSpoofLarpProfileEffect()) return undefined;
 
     const configured = settings.store.larpProfileEffect;
     if (!configured?.skuId || configured.skuId !== String(skuId)) return undefined;
@@ -1440,7 +1460,10 @@ function getLarpProfileEffectItemBySkuId(skuId: string | null | undefined) {
 
     const raw = item
         ? (plainStoreObject(item) ?? item as Record<string, unknown>)
-        : (configured as Record<string, unknown>);
+        : (Array.isArray(configured.effects) && configured.effects.length > 0
+            ? (configured as Record<string, unknown>)
+            : null);
+    if (!raw) return undefined;
     return parseProfileEffectItem(raw, String(skuId)) ?? undefined;
 }
 
@@ -1484,21 +1507,23 @@ function equipAvatarDecoration(item: ShopAvatarDeco | null) {
 function equipProfileEffect(item: ShopProfileEffect | null) {
     settings.store.larpProfileEffect = item?.effect ?? null;
     if (!item) {
-        triggerProfileRefresh();
+        larpProfileEffectReady = true;
+        triggerProfileRefresh(50);
         return;
     }
 
-    registerParsedProfileEffectProduct(
+    const registered = registerParsedProfileEffectProduct(
         item.skuId,
         item.name,
         item.effect as Record<string, unknown>,
     );
-
-    triggerProfileRefresh();
+    larpProfileEffectReady = registered || canSpoofLarpProfileEffect();
+    triggerProfileRefresh(50);
 
     void fetchShopProduct(item.skuId, true).then(product => {
         if (product?.sku_id) registerFullCollectibleProduct(product as Record<string, unknown>);
-        triggerProfileRefresh();
+        larpProfileEffectReady = canSpoofLarpProfileEffect();
+        triggerProfileRefresh(50);
     });
 }
 
@@ -2080,16 +2105,19 @@ function wrapDisplayProfile<T extends { userId: string; getBadges(): unknown[]; 
                 }>);
             }
             if (prop === "profileEffect") {
-                if (hasLarpProfileEffectConfigured()) {
+                if (canSpoofLarpProfileEffect()) {
                     return getLarpProfileEffect();
                 }
             }
             if (prop === "profileEffectId") {
-                if (hasLarpProfileEffectConfigured()) {
+                if (canSpoofLarpProfileEffect()) {
                     const larp = getLarpProfileEffect();
                     if (larp) return (larp as { id?: string; skuId?: string; }).id ?? (larp as { skuId?: string; }).skuId;
-                    return settings.store.larpProfileEffect?.id ?? settings.store.larpProfileEffect?.skuId;
                 }
+            }
+            if (prop === "createdAt") {
+                const custom = getCustomJoinDate();
+                if (custom) return custom;
             }
             if (prop === "__larpToolWrapped") return true;
             return Reflect.get(target, prop, receiver);
@@ -2105,6 +2133,21 @@ function getCustomName() {
     if (!settings.store.enabled) return null;
     const n = settings.store.customUsername.trim();
     return n || null;
+}
+
+function getCustomJoinDate(): Date | null {
+    if (!settings.store.enabled) return null;
+    const raw = settings.store.customJoinDate?.trim();
+    if (!raw) return null;
+    const match = raw.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (!match) return null;
+    const date = new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3]), 12, 0, 0));
+    return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function getCustomJoinDateMs(): number | null {
+    const date = getCustomJoinDate();
+    return date ? date.getTime() : null;
 }
 
 function withLarpUser(user: User | null | undefined): User | null | undefined {
@@ -2157,6 +2200,10 @@ function withLarpUser(user: User | null | undefined): User | null | undefined {
                     return stripRealNameplateCollectibles();
                 }
             }
+            if (prop === "createdAt") {
+                const custom = getCustomJoinDate();
+                if (custom) return custom;
+            }
             return Reflect.get(target, prop, receiver);
         },
     }) as User & { __larpKey?: string; };
@@ -2185,7 +2232,7 @@ function resolveRenderedProfileEffect(
         return readProfileEffect();
     }
 
-    if (hasLarpProfileEffectConfigured()) {
+    if (canSpoofLarpProfileEffect()) {
         return getLarpProfileEffect();
     }
 
@@ -2225,6 +2272,15 @@ function pickLarpNameplateUserValue(
 ) {
     const value = useLarpNameplate(user);
     return value !== undefined ? value : fallback;
+}
+
+function getLarpCreatedAt(userId: string | null | undefined, fallback: number | Date | null | undefined) {
+    if (userId && userId === getCurrentUserId()) {
+        const ms = getCustomJoinDateMs();
+        if (ms != null) return ms;
+    }
+    if (fallback instanceof Date) return fallback.getTime();
+    return typeof fallback === "number" ? fallback : fallback ?? 0;
 }
 
 function getAccountSettingsUsername(user: User) {
@@ -2523,12 +2579,12 @@ function buildUserUpdatePayload() {
     return payload;
 }
 
-function triggerProfileRefresh(debounceMs = 0) {
+function triggerProfileRefresh(debounceMs = 100) {
     if (debounceMs > 0) {
         if (profileRefreshTimer) clearTimeout(profileRefreshTimer);
         profileRefreshTimer = setTimeout(() => {
             profileRefreshTimer = null;
-            triggerProfileRefresh();
+            triggerProfileRefresh(0);
         }, debounceMs);
         return;
     }
@@ -2631,9 +2687,10 @@ function filterBadges(
 
 function mergeLarpDisplayBadges(
     profile: { userId?: string; user?: { id: string; }; },
-    badges: Array<{ id?: string; key?: string; icon?: string; iconSrc?: string; link?: string; }>,
+    badges: Array<{ id?: string; key?: string; icon?: string; iconSrc?: string; link?: string; }> | null | undefined,
 ) {
-    const result = [...filterBadges(profile, badges)];
+    const safeBadges = Array.isArray(badges) ? badges : [];
+    const result = [...filterBadges(profile, safeBadges)];
     if (!settings.store.enabled) return result;
 
     const userId = profile?.userId ?? profile?.user?.id;
@@ -3855,6 +3912,7 @@ const BadgeModal = ErrorBoundary.wrap(function BadgeModal(props: RenderModalProp
 
     settings.use([
         "customUsername",
+        "customJoinDate",
         "hiddenBadges",
         "addedBadges",
         "connectionOverrides",
@@ -3915,19 +3973,38 @@ const BadgeModal = ErrorBoundary.wrap(function BadgeModal(props: RenderModalProp
                     <ScrollerThin style={{ maxHeight: "58vh", paddingTop: 2 }}>
                         <div key={tab} className="vc-larp-tab-panel">
                             {tab === ModalTabs.Username && (
-                                <div style={cardStyle}>
-                                    <Text variant="text-xs/medium" style={{ ...sectionTitleStyle, marginBottom: 8 }}>
-                                        Custom username
-                                    </Text>
-                                    <TextInput
-                                        value={settings.store.customUsername}
-                                        onChange={v => {
-                                            settings.store.customUsername = v;
-                                            triggerProfileRefresh(200);
-                                        }}
-                                        placeholder="Your @username"
-                                        maxLength={32}
-                                    />
+                                <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+                                    <div style={cardStyle}>
+                                        <Text variant="text-xs/medium" style={{ ...sectionTitleStyle, marginBottom: 8 }}>
+                                            Custom username
+                                        </Text>
+                                        <TextInput
+                                            value={settings.store.customUsername}
+                                            onChange={v => {
+                                                settings.store.customUsername = v;
+                                                triggerProfileRefresh(200);
+                                            }}
+                                            placeholder="Your @username"
+                                            maxLength={32}
+                                        />
+                                    </div>
+                                    <div style={cardStyle}>
+                                        <Text variant="text-xs/medium" style={{ ...sectionTitleStyle, marginBottom: 8 }}>
+                                            Member since
+                                        </Text>
+                                        <TextInput
+                                            value={settings.store.customJoinDate}
+                                            onChange={v => {
+                                                settings.store.customJoinDate = v;
+                                                triggerProfileRefresh(200);
+                                            }}
+                                            placeholder="YYYY-MM-DD (leave empty for real)"
+                                            maxLength={10}
+                                        />
+                                        <Forms.FormText style={{ margin: "8px 0 0", color: "var(--text-muted)", fontSize: 12 }}>
+                                            Spoofs the account Member Since date on your profile.
+                                        </Forms.FormText>
+                                    </div>
                                 </div>
                             )}
 
@@ -4034,18 +4111,19 @@ function wrapOwnUserProfile(profile: NonNullable<ReturnType<typeof UserProfileSt
     const cached = wrappedProfileCache.get(profile);
     if (cached?.gen === profileWrapGeneration) return cached.value;
 
-    const hasLarpEffect = hasLarpProfileEffectConfigured();
-    const larpEffect = getLarpProfileEffect();
+    const canSpoofEffect = canSpoofLarpProfileEffect();
+    const larpEffect = canSpoofEffect ? getLarpProfileEffect() : null;
+    const joinDate = getCustomJoinDate();
     const wrapped = Object.assign(Object.create(Object.getPrototypeOf(profile)), profile, {
         badges: mergeProfileBadges(userId, profile.badges),
         connectedAccounts: applyLarpConnections(profile.connectedAccounts),
-        ...(hasLarpEffect ? {
+        ...(canSpoofEffect && larpEffect ? {
             profileEffect: larpEffect,
-            profileEffectId: larpEffect
-                ? ((larpEffect as { id?: string; skuId?: string; }).id ?? (larpEffect as { skuId?: string; }).skuId)
-                : settings.store.larpProfileEffect?.id ?? settings.store.larpProfileEffect?.skuId,
+            profileEffectId: (larpEffect as { id?: string; skuId?: string; }).id
+                ?? (larpEffect as { skuId?: string; }).skuId,
             profileEffectExpiresAt: null,
         } : {}),
+        ...(joinDate ? { createdAt: joinDate } : {}),
     });
 
     wrappedProfileCache.set(profile, { gen: profileWrapGeneration, value: wrapped });
@@ -4067,15 +4145,21 @@ function patchUserProfileStore() {
 }
 
 function patchProfileDomScope() {
+    let lastMark = 0;
     const markOwnProfileNodes = () => {
         if (!settings.store.enabled || !settings.store.hiddenBadges.length) return;
+
+        const now = Date.now();
+        if (now - lastMark < 400) return;
+        lastMark = now;
 
         const userId = getCurrentUserId();
         if (!userId) return;
 
-        const real = getRealUsername();
-        for (const el of document.querySelectorAll(`[aria-label$=" profile popout"], [class*="userPopout"]`)) {
-            if (el.querySelector(`[href="/users/${userId}"]`) || (real && el.textContent?.includes(real))) {
+        for (const el of document.querySelectorAll(
+            `[class*="userPopoutOuter"], [class*="userProfileModal"], [aria-label$=" profile popout"]`
+        )) {
+            if (el.querySelector(`[href*="/users/${userId}"]`)) {
                 (el as HTMLElement).dataset.larpUser = userId;
             }
         }
@@ -4402,6 +4486,20 @@ export default definePlugin({
                 replace: "$self.pickLarpNameplateUserValue($2,$1)"
             }
         },
+        {
+            find: "#{intl::USER_PROFILE_MEMBER_SINCE}",
+            replacement: {
+                match: /(\i)\.getCreatedAt\(\)/,
+                replace: "($self.getLarpCreatedAt($1.id,$1.getCreatedAt?.()??$1.createdAt))"
+            }
+        },
+        {
+            find: "#{intl::USER_PROFILE_MEMBER_SINCE}",
+            replacement: {
+                match: /extractTimestamp\((\i)(?:\.id)?\)/,
+                replace: "$self.getLarpCreatedAt(typeof $1===\"string\"?$1:$1?.id,extractTimestamp($1))"
+            }
+        },
     ],
 
     withCustomUsernameOnly,
@@ -4421,6 +4519,7 @@ export default definePlugin({
     getLarpProfileEffectItemBySkuId,
     getLarpNameplate,
     getLarpNameplateProduct,
+    getLarpCreatedAt,
     filterBadges,
     mergeLarpDisplayBadges,
     getCurrentUserId,

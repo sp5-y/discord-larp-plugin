@@ -1,6 +1,6 @@
 # Discord Larp Tool
 
-A [Vencord](https://github.com/Vendicated/Vencord) userplugin that customizes how **your own** profile looks visully 
+A [Vencord](https://github.com/Vendicated/Vencord) userplugin that customizes how **your own** profile looks visually.
 
 <p align="center">
   <img src="./assets/prev.png" width="48%" alt="Larp Tool manager" />
@@ -9,51 +9,97 @@ A [Vencord](https://github.com/Vendicated/Vencord) userplugin that customizes ho
 
 ## Features
 
-- **Add badges** — show badges you don't have
-- **Hide badges** — toggle off badges you actually own
+- **Add / hide badges** — including Nitro tiers, boosts, and gifting badges
 - **Custom `@username`** — spoof your handle in profile, settings, and messages
-- **Connections** — rename real connections, or add fake ones
-- **Decorations** — add decorations without owning them
+- **Member Since** — spoof your account join date (`YYYY-MM-DD`)
+- **Decorations** — avatar decorations, profile effects (banner tab), nameplates
+- **Connections** — rename, hide, or add fake linked accounts
 
 ## Requirements
 
-- [Discord Desktop](https://discord.com/download) (patched with a custom Vencord build)
+- [Discord Desktop](https://discord.com/download)
 - [Git](https://git-scm.com/download/win)
-- [Node.js](https://nodejs.org/) (includes `corepack` for pnpm)
+- [Node.js](https://nodejs.org/) (LTS)
 
 ## Quick setup
-
-Clone this repo, then run:
 
 ```bat
 auto-setup.bat
 ```
 
-Restart Discord fully. Press **CTRL + B** inside of discord to open the tool
+Then **fully restart Discord** (tray icon too). Press **Ctrl+B** to open the tool.
 
-## Manual setup
+| Command | What it does |
+|---|---|
+| `auto-setup.bat` | Clone/update Vencord, build, patch Discord |
+| `auto-setup.bat rebuild` | Copy plugin + rebuild only (no patch) |
+| `auto-setup.bat inject` | Rebuild + patch Discord |
 
-Follow the [Vencord custom plugins guide](https://docs.vencord.dev/installing/custom-plugins/):
+```bat
+set DISCORD_BRANCH=stable
+set DISCORD_LOCATION=C:\path\to\Discord
+set VENCORD_DIR=C:\path\to\Vencord
+set NOINJECT=1
+```
 
-1. [Build Vencord from source](https://docs.vencord.dev/installing/#building-vencord)
-2. Create `src/userplugins/larp/` in your Vencord folder
-3. Copy `larp/index.tsx` into that folder
-4. Run `pnpm build` and patch Discord (`pnpm inject` or the installer script)
-5. Restart Discord fully. Press **CTRL + B** inside of discord to open the tool
+## FAQ / troubleshooting
+
+### Setup stuck on “enabling pnpm via corepack…”
+That means it is **not done** — corepack was hanging. Newer `auto-setup.bat` installs pnpm with `npm install -g pnpm@9` instead.
+
+If it still hangs:
+1. Close the window
+2. Open a terminal and run: `npm install -g pnpm@9`
+3. Run `auto-setup.bat inject` again
+
+You are done only when you see **`Done!`** and get a `Press any key` prompt.
+
+### Banner decorations not working
+The **Banner** tab equips Discord **profile effects** (animated overlay), not a custom banner image.
+
+After this update, effects only apply once Discord has a valid effect instance (so they no longer crash your profile). Equip again from Decorations → Banner, wait a second for the product to load, then reopen your profile.
+
+### Profile crashes when I open it
+Usually caused by an incomplete profile effect. Update + inject, then:
+1. Decorations → Banner → **Remove**
+2. Restart Discord
+3. Re-equip the effect if you still want it
+
+### Vencord told me to delete the Discord folder and nothing came back
+Deleting `%LOCALAPPDATA%\Discord` wipes the install. Fix:
+
+1. Download Discord again from [discord.com/download](https://discord.com/download) and install it
+2. Let it finish updating once
+3. Fully close Discord
+4. Run `auto-setup.bat inject`
+5. Open Discord → Vencord Settings → enable **Larp Tool**
+
+Do **not** delete `%APPDATA%\discord` unless you want to wipe login/settings too.
+
+### Discord uses a lot of memory
+This plugin now:
+- Debounces profile refreshes
+- Stops registering every shop item into memory while browsing
+- Throttles the badge-hide DOM observer
+- Preloads fewer decoration images
+
+Discord itself is still heavy; the plugin should no longer pile on as much.
 
 ## Usage
 
 | Tab | What it does |
 |---|---|
-| **Username** | Set a custom `@username` shown in the client |
-| **Badges** | Search, hide owned badges, or add fake ones |
-| **Connections** | Override handles, hide real links, or add fake connections |
+| **Username** | Custom `@username` + Member Since date |
+| **Badges** | Search, hide owned badges, add fake ones |
+| **Decorations** | Avatar / Banner (profile effect) / Nameplate |
+| **Connections** | Override, hide, or add linked accounts |
+| **Credits** | About |
 
-Use **Reset** in the modal to clear all overrides.
+**Reset** (gray, left) clears everything. **Close** (blue, right) closes the modal.
 
 ## Disclaimer
 
-This plugin only changes what **you** see in your Discord client. It does not modify your account on Discord's servers. Vencord custom plugins are unofficial — see the [custom plugins docs](https://docs.vencord.dev/installing/custom-plugins/).
+Client-side only. Nothing is sent to Discord’s servers. Only you see the changes. Unofficial — see [Vencord custom plugins](https://docs.vencord.dev/installing/custom-plugins/).
 
 ---
 
