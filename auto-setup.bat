@@ -124,12 +124,35 @@ if not errorlevel 1 (
     echo [OK] pnpm
     exit /b 0
 )
-echo [..] enabling pnpm via corepack...
-where corepack >nul 2>&1 || (echo [ERROR] corepack missing & exit /b 1)
-corepack enable >nul 2>&1
-call corepack prepare pnpm@latest --activate
-where pnpm >nul 2>&1 || (echo [ERROR] pnpm not available & exit /b 1)
+
+echo [..] pnpm missing - installing via npm (this can take 1-2 minutes)...
+where npm >nul 2>&1 || (
+    echo [ERROR] npm not found. Reinstall Node.js from https://nodejs.org/
+    exit /b 1
+)
+
+call npm install -g pnpm@9
+if errorlevel 1 (
+    echo [WARN] npm global install failed, trying corepack...
+    where corepack >nul 2>&1 || (
+        echo [ERROR] could not install pnpm
+        exit /b 1
+    )
+    echo [..] corepack enable...
+    call corepack enable
+    echo [..] corepack prepare pnpm@9.15.0 --activate
+    call corepack prepare pnpm@9.15.0 --activate
+)
+
+where pnpm >nul 2>&1
+if errorlevel 1 (
+    echo [ERROR] pnpm still not available after install
+    echo         Try manually: npm install -g pnpm@9
+    exit /b 1
+)
+
 echo [OK] pnpm ready
+pnpm --version
 exit /b 0
 
 :clone_or_update_vencord
