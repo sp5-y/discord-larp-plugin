@@ -8,7 +8,7 @@ import type { Embed, Message } from "@vencord/discord-types";
 import { waitFor, filters, findByCodeLazy, findByPropsLazy } from "@webpack";
 import {
     AuthenticationStore, ConnectedAccount, Constants, FluxDispatcher,
-    openModal, closeModal, Modal, TextInput, Checkbox, Button, Forms, Text,
+    openModal, closeModal, Modal, TextInput, Button, Forms, Text,
     DisplayProfileUtils, ScrollerThin, UserProfileStore, UserStore,
     UsernameUtils, useStateFromStores, TabBar, useState, useRef, useEffect, useMemo,
     showToast, Toasts, ReactDOM, RestAPI, MessageStore, Parser,
@@ -382,23 +382,31 @@ let profileDomObserverRafId = 0;
 let profileDomObserverActive = false;
 let profileDomObserverScheduled = false;
 let usernameSwapCtx: UsernameSwapCtx = { active: false, real: "", custom: "" };
-let badgeProfileUserId: string | undefined;
-
 const HIDDEN_BADGE_STYLE_ID = "vc-larp-tool-hidden-badges";
-const TAB_ANIM_STYLE_ID = "vc-larp-tool-tab-anim";
+const TAB_ANIM_STYLE_ID = "vc-larp-tool-tab-anim-v2";
 
-const ModalTabs = { Username: 0, Badges: 1, Decorations: 2, Connections: 3, Credits: 4 } as const;
+const ModalTabs = {
+    Username: 0,
+    Badges: 1,
+    Decorations: 2,
+    MemberSince: 3,
+    Connections: 4,
+    Credits: 5,
+} as const;
 const DecorationSubTabs = { Avatar: 0, Banner: 1, Nameplate: 2 } as const;
 const SHOP_CACHE_MS = 30 * 60 * 1000;
-const DECORATION_BROWSE_LIMIT = 20;
+const DECORATION_BROWSE_LIMIT = 16;
 const COLLECTIBLE_TYPE_BUNDLE = 1000;
+const SHOP_SEARCH_CACHE_MAX = 12;
 
 let shopCache: {
     avatar: ShopAvatarDeco[];
     banner: ShopProfileEffect[];
     nameplate: ShopNameplate[];
     fetchedAt: number;
+    version?: number;
 } | null = null;
+const SHOP_CACHE_VERSION = 3;
 const shopEnrichedTabs = new Set<number>();
 
 const shopProductCache = new Map<string, {
@@ -423,10 +431,11 @@ const collectiblesProductStores = new Set<{
     __larpPatched?: boolean;
 }>();
 const preloadedDecorationUrls = new Set<string>();
-const SHOP_PRODUCT_BATCH_SIZE = 16;
-const SHOP_ENRICH_CONCURRENCY = 4;
-const SHOP_PRELOAD_LIMIT = 8;
+const SHOP_PRODUCT_BATCH_SIZE = 8;
+const SHOP_ENRICH_CONCURRENCY = 2;
+const SHOP_PRELOAD_LIMIT = 6;
 const COLLECTIBLES_SHOP_CDN = "https://cdn.discordapp.com/media/v1/collectibles-shop";
+const COLLECTIBLES_ASSET_CDN = "https://cdn.discordapp.com/assets/collectibles";
 const AVATAR_DECORATION_CDN = "https://cdn.discordapp.com/avatar-decoration-presets";
 const VALID_NAMEPLATE_PALETTES = new Set([
     "berry", "bubble_gum", "clover", "cobalt", "crimson", "forest", "lemon", "sky", "teal", "violet", "white",
@@ -508,30 +517,50 @@ interface LarpExportData {
 }
 
 const cardStyle = {
-    padding: "10px 12px",
-    borderRadius: 10,
-    background: "var(--background-tertiary)",
-    border: "1px solid var(--background-modifier-accent)",
+    padding: "12px 14px",
+    borderRadius: 12,
+    background: "transparent",
+    border: "none",
+    boxShadow: "0 1px 0 rgba(0,0,0,0.18), 0 4px 14px rgba(0,0,0,0.12)",
 };
 
 const connectionRowStyle = {
     display: "flex",
     alignItems: "center",
     gap: 10,
-    padding: "8px 12px",
-    borderRadius: 10,
-    background: "var(--background-tertiary)",
-    border: "1px solid var(--background-modifier-accent)",
+    padding: "10px 12px",
+    borderRadius: 12,
+    background: "transparent",
+    border: "none",
+    boxShadow: "0 1px 0 rgba(0,0,0,0.18), 0 4px 14px rgba(0,0,0,0.12)",
 };
 
 const sectionTitleStyle = {
-    margin: "0 0 10px",
+    margin: "0 0 8px",
     color: "var(--header-secondary)",
     fontSize: 11,
-    fontWeight: 700,
-    letterSpacing: "0.06em",
+    fontWeight: 600,
+    letterSpacing: "0.04em",
     textTransform: "uppercase" as const,
 };
+
+const MODAL_BODY_MAX_HEIGHT = "38vh";
+
+function FieldCard({ label, hint, children }: { label: string; hint?: string; children: any }) {
+    return (
+        <div style={cardStyle}>
+            <Text variant="text-xs/medium" style={{ ...sectionTitleStyle, marginBottom: hint ? 4 : 8 }}>
+                {label}
+            </Text>
+            {hint && (
+                <Forms.FormText style={{ margin: "0 0 10px", color: "var(--text-muted)", fontSize: 12 }}>
+                    {hint}
+                </Forms.FormText>
+            )}
+            {children}
+        </div>
+    );
+}
 
 function applyLarpExportData(data: LarpExportData) {
     settings.store.customUsername = typeof data.customUsername === "string" ? data.customUsername.slice(0, 32) : "";
@@ -603,6 +632,7 @@ function resetLarpConfig() {
 
 function ensureTabAnimStyles() {
     if (document.getElementById(TAB_ANIM_STYLE_ID)) return;
+    document.getElementById("vc-larp-tool-tab-anim")?.remove();
     const style = document.createElement("style");
     style.id = TAB_ANIM_STYLE_ID;
     style.textContent = `
@@ -610,8 +640,65 @@ function ensureTabAnimStyles() {
             from { opacity: 0; transform: translateY(6px); }
             to { opacity: 1; transform: translateY(0); }
         }
+        @keyframes vc-larp-skeleton {
+            0% { background-position: 100% 0; }
+            100% { background-position: -100% 0; }
+        }
         .vc-larp-tab-panel {
             animation: vc-larp-tab-in 180ms cubic-bezier(0.2, 0, 0, 1) both;
+        }
+        .vc-larp-skeleton {
+            background: linear-gradient(
+                90deg,
+                rgba(255,255,255,0.04) 0%,
+                rgba(255,255,255,0.1) 45%,
+                rgba(255,255,255,0.04) 90%
+            );
+            background-size: 200% 100%;
+            animation: vc-larp-skeleton 1.1s ease-in-out infinite;
+            border-radius: 10px;
+        }
+        .vc-larp-seg {
+            display: flex;
+            gap: 4px;
+            padding: 4px;
+            border-radius: 10px;
+            box-shadow: 0 1px 0 rgba(0,0,0,0.18), 0 4px 14px rgba(0,0,0,0.12);
+            margin-bottom: 12px;
+        }
+        .vc-larp-seg-btn {
+            flex: 1;
+            border: none;
+            background: transparent;
+            color: var(--text-muted);
+            font-size: 13px;
+            font-weight: 600;
+            padding: 8px 10px;
+            border-radius: 8px;
+            cursor: pointer;
+        }
+        .vc-larp-seg-btn[data-active="true"] {
+            background: var(--background-modifier-selected);
+            color: var(--header-primary);
+        }
+        .vc-larp-icon-btn {
+            width: 28px;
+            height: 28px;
+            border: none;
+            border-radius: 8px;
+            background: transparent;
+            color: var(--interactive-normal);
+            cursor: pointer;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 18px;
+            line-height: 1;
+            flex-shrink: 0;
+        }
+        .vc-larp-icon-btn:hover {
+            background: var(--background-modifier-hover);
+            color: var(--interactive-active);
         }
     `;
     document.head.appendChild(style);
@@ -967,6 +1054,38 @@ function getCollectiblesAssetFormat(format: "static" | "animated" | "video") {
     return map.STATIC;
 }
 
+function resolveNameplatePreviewUrl(asset: string) {
+    if (!asset) return "";
+    if (asset.startsWith("http")) return asset;
+
+    const path = asset.replace(/^\/+/, "").replace(/\/?$/, "/");
+    return `${COLLECTIBLES_ASSET_CDN}/${path}static.png`;
+}
+
+function resolveNameplateAnimatedUrl(asset: string) {
+    if (!asset) return "";
+    if (asset.startsWith("http")) {
+        if (asset.endsWith("static.png")) return asset.replace(/static\.png$/, "asset.webm");
+        if (asset.endsWith("img.png")) return asset.replace(/img\.png$/, "asset.webm");
+        return asset;
+    }
+
+    const path = asset.replace(/^\/+/, "").replace(/\/?$/, "/");
+    return `${COLLECTIBLES_ASSET_CDN}/${path}asset.webm`;
+}
+
+function resolveNameplateAssetCandidates(asset: string) {
+    if (!asset) return [] as string[];
+    if (asset.startsWith("http")) return [asset];
+
+    const path = asset.replace(/^\/+/, "").replace(/\/?$/, "/");
+    return [
+        `${COLLECTIBLES_ASSET_CDN}/${path}static.png`,
+        `${COLLECTIBLES_ASSET_CDN}/${path}img.png`,
+        `${COLLECTIBLES_ASSET_CDN}/${path}asset.webm`,
+    ];
+}
+
 function getCollectiblesShopAssetUrl(
     skuId: string,
     format: "static" | "animated" | "video" = "static",
@@ -1028,7 +1147,7 @@ function resolveShopPreviewUrl(
 
     if (type === 2) {
         if (typeof item.asset === "string") {
-            return getCollectiblesShopAssetUrl(skuId, "static", item.asset);
+            return resolveNameplatePreviewUrl(item.asset);
         }
         return getCollectiblesShopAssetUrl(skuId, "static");
     }
@@ -1036,7 +1155,8 @@ function resolveShopPreviewUrl(
     return getCollectiblesShopAssetUrl(skuId, "static");
 }
 
-function shopPreviewNeedsEnrichment(previewUrl: string, type: number) {
+function shopPreviewNeedsEnrichment(previewUrl: string, type: number, item?: { effect?: { effects?: unknown[]; }; asset?: string; }) {
+    if (type === 1 && !(item?.effect?.effects && item.effect.effects.length > 0)) return true;
     if (!previewUrl) return true;
     const url = absolutizeCollectibleUrl(previewUrl);
     if (type === 0) return !url.includes("avatar-decoration-presets");
@@ -1045,8 +1165,10 @@ function shopPreviewNeedsEnrichment(previewUrl: string, type: number) {
             || /\/collectibles-shop\/[^/]+\/static(?:\?|$|\/)/.test(url);
     }
     if (type === 2) {
-        return !url.startsWith("http")
-            || /\/collectibles-shop\/[^/]+\/static(?:\?|$|\/)/.test(url);
+        // Nameplates must use assets/collectibles/{asset}/static.png — shop CDN URLs are wrong
+        if (url.includes("/assets/collectibles/") && url.endsWith("static.png")) return false;
+        if (typeof item?.asset === "string" && item.asset.includes("nameplates")) return false;
+        return !url.includes("/assets/collectibles/");
     }
     return false;
 }
@@ -1067,11 +1189,11 @@ async function runWithConcurrency<T>(jobs: Array<() => Promise<T>>, limit: numbe
     return results;
 }
 
-async function enrichShopItemPreview<T extends { skuId: string; previewUrl: string; }>(
+async function enrichShopItemPreview<T extends { skuId: string; previewUrl: string; effect?: LarpProfileEffectSetting; }>(
     item: T,
     type: number,
 ): Promise<T> {
-    if (!shopPreviewNeedsEnrichment(item.previewUrl, type)) return item;
+    if (!shopPreviewNeedsEnrichment(item.previewUrl, type, item)) return item;
 
     try {
         const product = await fetchShopProduct(item.skuId);
@@ -1081,17 +1203,35 @@ async function enrichShopItemPreview<T extends { skuId: string; previewUrl: stri
         collectShopItemsFromProduct(product, avatar, banner, nameplate);
         const pool = type === 0 ? avatar : type === 1 ? banner : nameplate;
         const match = pool.find(entry => entry.skuId === item.skuId);
-        if (match?.previewUrl) return { ...item, previewUrl: match.previewUrl };
+        if (!match) return item;
+
+        if (type === 1) {
+            const bannerMatch = match as ShopProfileEffect;
+            return {
+                ...item,
+                previewUrl: bannerMatch.previewUrl || item.previewUrl,
+                effect: {
+                    ...(item.effect ?? {}),
+                    ...bannerMatch.effect,
+                    skuId: item.skuId,
+                    effects: bannerMatch.effect.effects?.length
+                        ? bannerMatch.effect.effects
+                        : item.effect?.effects,
+                },
+            };
+        }
+
+        if (match.previewUrl) return { ...item, previewUrl: match.previewUrl };
     } catch { }
 
     return item;
 }
 
 async function enrichShopPreviews(cache: NonNullable<typeof shopCache>, type?: number) {
-    const enrichType = (list: Array<{ skuId: string; previewUrl: string; }>, itemType: number, mutate: (idx: number, item: typeof list[number]) => void) => {
+    const enrichType = (list: Array<{ skuId: string; previewUrl: string; effect?: LarpProfileEffectSetting; }>, itemType: number, mutate: (idx: number, item: typeof list[number]) => void) => {
         const jobs: Array<() => Promise<void>> = [];
         for (let i = 0; i < Math.min(list.length, DECORATION_BROWSE_LIMIT); i++) {
-            if (!shopPreviewNeedsEnrichment(list[i].previewUrl, itemType)) continue;
+            if (!shopPreviewNeedsEnrichment(list[i].previewUrl, itemType, list[i])) continue;
             const idx = i;
             jobs.push(async () => {
                 const item = await enrichShopItemPreview(list[idx], itemType);
@@ -1192,6 +1332,20 @@ function getBrowseDecorationItems<T extends { skuId: string; }>(
     return [equipped, ...base.slice(0, limit - 1)];
 }
 
+function resolveCollectibleItemType(
+    item: Record<string, unknown>,
+    product: { type?: number; },
+): number | undefined {
+    if (typeof item.type === "number") return item.type;
+    if (typeof product.type === "number" && product.type !== COLLECTIBLE_TYPE_BUNDLE) return product.type;
+    if (Array.isArray(item.effects) || item.thumbnailPreviewSrc || item.staticFrameSrc || item.reducedMotionSrc) {
+        return 1;
+    }
+    if (typeof item.asset === "string" && typeof item.palette === "string") return 2;
+    if (typeof item.asset === "string") return 0;
+    return undefined;
+}
+
 function collectShopItemsFromProduct(
     product: {
         sku_id?: string;
@@ -1207,15 +1361,18 @@ function collectShopItemsFromProduct(
     const visit = (p: typeof product) => {
         if (p.type === COLLECTIBLE_TYPE_BUNDLE) return;
 
-        for (const item of p.items ?? []) {
-            const type = item.type as number | undefined;
-            if (type === COLLECTIBLE_TYPE_BUNDLE) continue;
+        const items = p.items?.length
+            ? p.items
+            : (typeof p.type === "number" ? [p as unknown as Record<string, unknown>] : []);
+
+        for (const item of items) {
+            if (item.type === COLLECTIBLE_TYPE_BUNDLE) continue;
 
             const skuId = String(p.sku_id ?? item.sku_id ?? "");
             if (!skuId) continue;
 
             const assets = item.assets as { static_image_url?: string; animated_image_url?: string; } | undefined;
-            const resolvedType = typeof type === "number" ? type : (p.type === 2 ? 2 : undefined);
+            const resolvedType = resolveCollectibleItemType(item, p);
 
             if (resolvedType === 0 && typeof item.asset === "string") {
                 const label = String(item.label ?? p.name ?? "Avatar decoration");
@@ -1231,32 +1388,36 @@ function collectShopItemsFromProduct(
 
             if (resolvedType === 1) {
                 const name = String(item.title ?? p.name ?? "Profile effect");
+                const previewUrl = absolutizeCollectibleUrl(String(
+                    item.thumbnailPreviewSrc
+                    ?? item.staticFrameSrc
+                    ?? item.reducedMotionSrc
+                    ?? resolveShopPreviewUrl(skuId, 1, item, assets)
+                ));
                 banner.push({
                     skuId,
                     name,
-                    previewUrl: String(
-                        item.thumbnailPreviewSrc ?? item.staticFrameSrc ?? resolveShopPreviewUrl(skuId, 1, item, assets)
-                    ),
+                    previewUrl,
                     effect: {
                         skuId,
                         id: typeof item.id === "string" ? item.id : skuId,
-                        title: typeof item.title === "string" ? item.title : undefined,
+                        title: typeof item.title === "string" ? item.title : name,
                         description: typeof item.description === "string" ? item.description : undefined,
                         accessibilityLabel: typeof item.accessibilityLabel === "string"
                             ? item.accessibilityLabel
                             : undefined,
                         animationType: typeof item.animationType === "number" ? item.animationType : undefined,
                         thumbnailPreviewSrc: typeof item.thumbnailPreviewSrc === "string"
-                            ? item.thumbnailPreviewSrc
+                            ? absolutizeCollectibleUrl(item.thumbnailPreviewSrc)
                             : undefined,
                         reducedMotionSrc: typeof item.reducedMotionSrc === "string"
-                            ? item.reducedMotionSrc
+                            ? absolutizeCollectibleUrl(item.reducedMotionSrc)
                             : undefined,
                         staticFrameSrc: typeof item.staticFrameSrc === "string"
-                            ? item.staticFrameSrc
+                            ? absolutizeCollectibleUrl(item.staticFrameSrc)
                             : undefined,
                         effects: Array.isArray(item.effects) ? item.effects : undefined,
-                        type: typeof item.type === "number" ? item.type : undefined,
+                        type: 1,
                     },
                 });
             }
@@ -1282,7 +1443,11 @@ function collectShopItemsFromProduct(
 }
 
 async function fetchShopDecorations(force = false) {
-    if (!force && shopCache && Date.now() - shopCache.fetchedAt < SHOP_CACHE_MS) {
+    // Bust stale caches that were built before banner type parsing was fixed
+    if (!force && shopCache
+        && shopCache.version === SHOP_CACHE_VERSION
+        && Date.now() - shopCache.fetchedAt < SHOP_CACHE_MS
+        && (shopCache.banner.length > 0 || shopCache.avatar.length === 0)) {
         return shopCache;
     }
 
@@ -1327,6 +1492,7 @@ async function fetchShopDecorations(force = false) {
         banner: dedupeShopBanner(banner),
         nameplate: dedupeShopNameplate(nameplate),
         fetchedAt: Date.now(),
+        version: SHOP_CACHE_VERSION,
     };
     shopEnrichedTabs.clear();
     return shopCache;
@@ -1505,26 +1671,71 @@ function equipAvatarDecoration(item: ShopAvatarDeco | null) {
 }
 
 function equipProfileEffect(item: ShopProfileEffect | null) {
-    settings.store.larpProfileEffect = item?.effect ?? null;
     if (!item) {
+        settings.store.larpProfileEffect = null;
         larpProfileEffectReady = true;
         triggerProfileRefresh(50);
         return;
     }
 
-    const registered = registerParsedProfileEffectProduct(
-        item.skuId,
-        item.name,
-        item.effect as Record<string, unknown>,
-    );
-    larpProfileEffectReady = registered || canSpoofLarpProfileEffect();
-    triggerProfileRefresh(50);
-
-    void fetchShopProduct(item.skuId, true).then(product => {
-        if (product?.sku_id) registerFullCollectibleProduct(product as Record<string, unknown>);
-        larpProfileEffectReady = canSpoofLarpProfileEffect();
+    const applyEffect = (effect: LarpProfileEffectSetting, name: string) => {
+        settings.store.larpProfileEffect = {
+            ...effect,
+            skuId: item.skuId,
+            id: effect.id ?? item.skuId,
+            title: effect.title ?? name,
+            type: 1,
+        };
+        const registered = registerParsedProfileEffectProduct(
+            item.skuId,
+            name,
+            settings.store.larpProfileEffect as Record<string, unknown>,
+        );
+        larpProfileEffectReady = registered || canSpoofLarpProfileEffect();
         triggerProfileRefresh(50);
-    });
+        return larpProfileEffectReady;
+    };
+
+    applyEffect({
+        ...item.effect,
+        thumbnailPreviewSrc: item.effect.thumbnailPreviewSrc ?? item.previewUrl,
+    }, item.name);
+
+    void (async () => {
+        try {
+            const hasEffects = Array.isArray(item.effect.effects) && item.effect.effects.length > 0;
+            if (hasEffects && canSpoofLarpProfileEffect()) return;
+
+            const product = await fetchShopProduct(item.skuId, true);
+            if (product?.sku_id) registerFullCollectibleProduct(product as Record<string, unknown>);
+
+            const avatar: ShopAvatarDeco[] = [];
+            const banner: ShopProfileEffect[] = [];
+            const nameplate: ShopNameplate[] = [];
+            collectShopItemsFromProduct(product as Parameters<typeof collectShopItemsFromProduct>[0], avatar, banner, nameplate);
+            const match = banner.find(b => b.skuId === item.skuId);
+            const productItem = getProfileEffectItemFromProduct(larpCollectibleProducts.get(item.skuId));
+            const hydrated = match?.effect
+                ?? (productItem
+                    ? (plainStoreObject(productItem) as LarpProfileEffectSetting | null)
+                    : null)
+                ?? item.effect;
+
+            const ready = applyEffect({
+                ...hydrated,
+                effects: (hydrated as LarpProfileEffectSetting).effects?.length
+                    ? (hydrated as LarpProfileEffectSetting).effects
+                    : item.effect.effects,
+            }, item.name);
+
+            if (!ready) {
+                showToast("Banner effect still loading — click it again in a second", Toasts.Type.SUCCESS);
+            }
+        } catch (e) {
+            console.warn("larp: equip profile effect failed", e);
+            showToast("Couldn't load that banner effect", Toasts.Type.FAILURE);
+        }
+    })();
 }
 
 function canSpoofLarpNameplate(plate: LarpNameplateSetting | null) {
@@ -2079,9 +2290,11 @@ function updateHiddenBadgeStyles() {
         if (asset) selectors.add(`img[src*="${asset.split("/").pop()}"]`);
     }
 
-    const scope = `[data-user-id="${userId}"]`;
+    // Only hide inside profiles we explicitly marked as the current user.
+    // Do not use bare [data-user-id] — that can appear outside own-profile contexts.
+    const scope = `[data-larp-user="${userId}"]`;
     style.textContent = [...selectors]
-        .map(sel => `${scope} ${sel}, [data-larp-user="${userId}"] ${sel} { display: none !important; }`)
+        .map(sel => `${scope} ${sel} { display: none !important; }`)
         .join("\n");
 }
 
@@ -2379,7 +2592,7 @@ function wrapMessageForDisplay(message: Message | null | undefined): Message | n
     }) as Message;
 
     wrappedMessageCache.set(cacheKey, wrapped);
-    if (wrappedMessageCache.size > 500) {
+    if (wrappedMessageCache.size > 200) {
         wrappedMessageCache.delete(wrappedMessageCache.keys().next().value!);
     }
 
@@ -2670,10 +2883,9 @@ function patchCollectiblesProductLookup() {
 
 function filterBadges(
     profile: { userId?: string; user?: { id: string; }; },
-    badges: Array<{ id?: string; key?: string; icon?: string; iconSrc?: string; }>
+    badges: Array<{ id?: string; key?: string; icon?: string; iconSrc?: string; userId?: string; }>
 ) {
     const userId = profile?.userId ?? profile?.user?.id;
-    badgeProfileUserId = userId;
 
     if (!settings.store.enabled) return badges;
     if (!userId || userId !== getCurrentUserId()) return badges;
@@ -2687,13 +2899,12 @@ function filterBadges(
 
 function mergeLarpDisplayBadges(
     profile: { userId?: string; user?: { id: string; }; },
-    badges: Array<{ id?: string; key?: string; icon?: string; iconSrc?: string; link?: string; }> | null | undefined,
+    badges: Array<{ id?: string; key?: string; icon?: string; iconSrc?: string; link?: string; userId?: string; }> | null | undefined,
 ) {
     const safeBadges = Array.isArray(badges) ? badges : [];
+    const userId = profile?.userId ?? profile?.user?.id;
     const result = [...filterBadges(profile, safeBadges)];
     if (!settings.store.enabled) return result;
-
-    const userId = profile?.userId ?? profile?.user?.id;
     if (!userId || userId !== getCurrentUserId()) return result;
 
     for (const id of settings.store.addedBadges) {
@@ -2706,7 +2917,8 @@ function mergeLarpDisplayBadges(
         if (built) result.push(built);
     }
 
-    return result;
+    // Stamp owner so icon rendering never leaks hide rules onto other profiles
+    return result.map(b => (b.userId ? b : { ...b, userId }));
 }
 
 function mergeProfileBadges(
@@ -2824,51 +3036,62 @@ function handleKeyDown(e: KeyboardEvent) {
     openBadgeManager();
 }
 
-function BadgeRow({ badge, visible, owned, disabled, onChange }: {
+function BadgeRow({ badge, active, locked, muted, onClick }: {
     badge: BadgeEntry;
-    visible: boolean;
-    owned: boolean;
-    disabled?: boolean;
-    onChange: (visible: boolean) => void;
+    active: boolean;
+    locked?: boolean;
+    muted?: boolean;
+    onClick: () => void;
 }) {
-    const locked = disabled && !visible;
-
     return (
-        <div style={{
-            ...cardStyle,
-            padding: "8px 12px",
-            opacity: locked ? 0.4 : 1,
-            pointerEvents: locked ? "none" : undefined,
-        }}>
-            <Checkbox
-                value={visible}
-                disabled={locked}
-                onChange={(_, checked) => onChange(checked)}
-                size={20}
+        <button
+            type="button"
+            title={badge.description + (locked ? " (exclusive)" : "")}
+            disabled={locked}
+            onClick={onClick}
+            style={{
+                display: "flex",
+                flexDirection: "column",
+                alignItems: "center",
+                gap: 6,
+                padding: "10px 8px",
+                borderRadius: 12,
+                border: active
+                    ? "2px solid var(--brand-experiment-560)"
+                    : "2px solid transparent",
+                background: "transparent",
+                boxShadow: "0 1px 0 rgba(0,0,0,0.18), 0 4px 14px rgba(0,0,0,0.12)",
+                opacity: locked ? 0.35 : muted ? 0.45 : 1,
+                cursor: locked ? "not-allowed" : "pointer",
+                filter: locked ? "grayscale(1)" : undefined,
+                minWidth: 0,
+            }}
+        >
+            <div style={{
+                width: 36,
+                height: 36,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+            }}>
+                <BadgeIcon id={badge.id} icon={badge.icon} size={28} />
+            </div>
+            <Text
+                variant="text-xxs/normal"
+                style={{
+                    color: "var(--text-muted)",
+                    textAlign: "center",
+                    lineHeight: "13px",
+                    maxWidth: "100%",
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    whiteSpace: "nowrap",
+                    width: "100%",
+                }}
             >
-                <div style={{ display: "flex", alignItems: "center", gap: 12, minWidth: 0 }}>
-                    <div style={{
-                        width: 32,
-                        height: 32,
-                        display: "flex",
-                        alignItems: "center",
-                        justifyContent: "center",
-                        flexShrink: 0,
-                        borderRadius: 8,
-                        background: "var(--background-secondary)",
-                        filter: locked ? "grayscale(1)" : undefined,
-                    }}>
-                        <BadgeIcon id={badge.id} icon={badge.icon} size={24} />
-                    </div>
-                    <Text
-                        variant="text-sm/medium"
-                        style={{ color: locked ? "var(--text-muted)" : "var(--text-normal)" }}
-                    >
-                        {badge.description}
-                    </Text>
-                </div>
-            </Checkbox>
-        </div>
+                {badge.description}
+            </Text>
+        </button>
     );
 }
 
@@ -2877,14 +3100,29 @@ function ProfilePreview({ asTitle }: { asTitle?: boolean }) {
     const user = UserStore.getCurrentUser();
     const avatarDecoPreview = settings.store.larpAvatarDecoration?.previewUrl;
     const nameplate = settings.store.larpNameplate;
-    const nameplatePreview = nameplate?.previewUrl
-        ?? (nameplate?.skuId && nameplate.asset
-            ? getCollectiblesShopAssetUrl(nameplate.skuId, "static", nameplate.asset)
-            : null);
+    const nameplatePreview = nameplate?.asset
+        ? resolveNameplatePreviewUrl(nameplate.asset)
+        : (nameplate?.previewUrl ?? null);
+    const nameplateAnimated = nameplate?.asset
+        ? resolveNameplateAnimatedUrl(nameplate.asset)
+        : null;
+    const [nameplateHover, setNameplateHover] = useState(false);
+    const videoRef = useRef<HTMLVideoElement>(null);
     const { yours, other } = useStateFromStores(
         [UserProfileStore, UserStore],
         () => getModalBadgeLists()
     );
+
+    useEffect(() => {
+        const video = videoRef.current;
+        if (!video) return;
+        if (nameplateHover) {
+            void video.play().catch(() => undefined);
+        } else {
+            video.pause();
+            video.currentTime = 0;
+        }
+    }, [nameplateHover]);
 
     const handle = settings.store.customUsername.trim() || user?.username || "username";
     const visible = [
@@ -2892,70 +3130,161 @@ function ProfilePreview({ asTitle }: { asTitle?: boolean }) {
         ...other.filter(b => isAddedBadgeVisible(b.id)),
     ];
 
+    const avatarSize = asTitle ? 56 : 48;
+    const badgeSize = asTitle ? 22 : 18;
+
+    const avatar = (
+        <div style={{
+            width: avatarSize, height: avatarSize, borderRadius: "50%",
+            background: "var(--background-tertiary)",
+            backgroundImage: user ? `url(${user.getAvatarURL(undefined, 96, true)})` : undefined,
+            backgroundSize: "cover",
+            flexShrink: 0,
+            position: "relative",
+        }}>
+            {avatarDecoPreview && (
+                <img
+                    src={avatarDecoPreview}
+                    alt=""
+                    style={{
+                        position: "absolute",
+                        inset: -7,
+                        width: "calc(100% + 14px)",
+                        height: "calc(100% + 14px)",
+                        pointerEvents: "none",
+                    }}
+                />
+            )}
+        </div>
+    );
+
+    const identity = (
+        <div style={{ flex: 1, minWidth: 0, overflow: "hidden" }}>
+            <Text
+                variant="text-lg/semibold"
+                style={{
+                    position: "relative",
+                    zIndex: 1,
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    whiteSpace: "nowrap",
+                }}
+            >
+                @{handle}
+            </Text>
+            {visible.length > 0 && (
+                <div style={{
+                    display: "flex",
+                    flexWrap: "nowrap",
+                    gap: 5,
+                    marginTop: 5,
+                    overflow: "hidden",
+                }}>
+                    {visible.slice(0, 8).map(b => (
+                        <BadgeIcon key={b.id} id={b.id} icon={b.icon} size={badgeSize} />
+                    ))}
+                </div>
+            )}
+        </div>
+    );
+
+    if (asTitle) {
+        const fadeMask = "linear-gradient(to bottom, rgba(0,0,0,0.85) 0%, rgba(0,0,0,0.45) 55%, transparent 100%)";
+        const mediaStyle = {
+            width: "100%",
+            height: "100%",
+            objectFit: "cover" as const,
+            objectPosition: "left center",
+            display: "block",
+        };
+        return (
+            <div
+                onMouseEnter={() => setNameplateHover(true)}
+                onMouseLeave={() => setNameplateHover(false)}
+                style={{
+                    position: "relative",
+                    height: 72,
+                    margin: 0,
+                    padding: 0,
+                    overflow: "hidden",
+                    borderRadius: 8,
+                }}
+            >
+                {nameplatePreview && (
+                    <div
+                        aria-hidden
+                        style={{
+                            position: "absolute",
+                            inset: 0,
+                            zIndex: 0,
+                            pointerEvents: "none",
+                            opacity: nameplateHover ? 0.62 : 0.5,
+                            transition: "opacity 160ms ease",
+                            WebkitMaskImage: fadeMask,
+                            maskImage: fadeMask,
+                            WebkitMaskSize: "100% 100%",
+                            maskSize: "100% 100%",
+                        }}
+                    >
+                        <img
+                            src={nameplatePreview}
+                            alt=""
+                            style={{
+                                ...mediaStyle,
+                                position: "absolute",
+                                inset: 0,
+                                opacity: nameplateHover && nameplateAnimated ? 0 : 1,
+                                transition: "opacity 140ms ease",
+                            }}
+                        />
+                        {nameplateAnimated && (
+                            <video
+                                ref={videoRef}
+                                src={nameplateAnimated}
+                                muted
+                                loop
+                                playsInline
+                                preload="metadata"
+                                style={{
+                                    ...mediaStyle,
+                                    position: "absolute",
+                                    inset: 0,
+                                    opacity: nameplateHover ? 1 : 0,
+                                    transition: "opacity 140ms ease",
+                                }}
+                            />
+                        )}
+                    </div>
+                )}
+                <div style={{
+                    position: "relative",
+                    zIndex: 1,
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 14,
+                    height: "100%",
+                    width: "100%",
+                    minWidth: 0,
+                    padding: "0 2px",
+                    boxSizing: "border-box",
+                }}>
+                    {avatar}
+                    {identity}
+                </div>
+            </div>
+        );
+    }
+
     return (
         <div style={{
             display: "flex",
             alignItems: "center",
             gap: 14,
-            ...(asTitle
-                ? { padding: "4px 0 8px", margin: 0 }
-                : { ...cardStyle, marginBottom: 16 }),
+            ...cardStyle,
+            marginBottom: 16,
         }}>
-            <div style={{
-                width: 48, height: 48, borderRadius: "50%",
-                background: "var(--background-tertiary)",
-                backgroundImage: user ? `url(${user.getAvatarURL(undefined, 80, true)})` : undefined,
-                backgroundSize: "cover",
-                flexShrink: 0,
-                position: "relative",
-            }}>
-                {avatarDecoPreview && (
-                    <img
-                        src={avatarDecoPreview}
-                        alt=""
-                        style={{
-                            position: "absolute",
-                            inset: -6,
-                            width: "calc(100% + 12px)",
-                            height: "calc(100% + 12px)",
-                            pointerEvents: "none",
-                        }}
-                    />
-                )}
-            </div>
-            <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ position: "relative", display: "inline-block", maxWidth: "100%" }}>
-                    {nameplatePreview && (
-                        <img
-                            src={nameplatePreview}
-                            alt=""
-                            style={{
-                                position: "absolute",
-                                left: -8,
-                                right: -8,
-                                top: "50%",
-                                transform: "translateY(-50%)",
-                                width: "calc(100% + 16px)",
-                                height: 28,
-                                objectFit: "contain",
-                                objectPosition: "left center",
-                                pointerEvents: "none",
-                                zIndex: 0,
-                            }}
-                        />
-                    )}
-                    <Text variant="text-lg/semibold" style={{ position: "relative", zIndex: 1 }}>
-                        @{handle}
-                    </Text>
-                </div>
-                {visible.length > 0 && (
-                    <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginTop: 6 }}>
-                        {visible.map(b => (
-                            <BadgeIcon key={b.id} id={b.id} icon={b.icon} size={20} />
-                        ))}
-                    </div>
-                )}
-            </div>
+            {avatar}
+            {identity}
         </div>
     );
 }
@@ -2994,10 +3323,10 @@ function ConnectionTypePicker({ options, value, onChange, placeholder }: {
     onChange: (value: string | null) => void;
     placeholder: string;
 }) {
-    const anchorRef = useRef<HTMLDivElement>(null);
+    const anchorRef = useRef<HTMLButtonElement>(null);
     const [open, setOpen] = useState(false);
     const [query, setQuery] = useState("");
-    const [menuRect, setMenuRect] = useState<{ left: number; width: number; bottom: number; } | null>(null);
+    const [menuRect, setMenuRect] = useState<{ left: number; top: number; width: number; } | null>(null);
 
     const selected = options.find(o => o.value === value);
     const filtered = useMemo(() => {
@@ -3012,10 +3341,13 @@ function ConnectionTypePicker({ options, value, onChange, placeholder }: {
         const el = anchorRef.current;
         if (!el) return;
         const rect = el.getBoundingClientRect();
+        const menuHeight = 280;
+        const spaceBelow = window.innerHeight - rect.bottom;
+        const openUp = spaceBelow < menuHeight && rect.top > spaceBelow;
         setMenuRect({
             left: rect.left,
-            width: rect.width,
-            bottom: window.innerHeight - rect.top + 6,
+            width: Math.max(rect.width, 240),
+            top: openUp ? Math.max(8, rect.top - menuHeight - 6) : rect.bottom + 6,
         });
     };
 
@@ -3056,7 +3388,7 @@ function ConnectionTypePicker({ options, value, onChange, placeholder }: {
                     position: "fixed",
                     inset: 0,
                     zIndex: 10050,
-                    background: "rgba(0, 0, 0, 0.55)",
+                    background: "transparent",
                 }}
             />
             <div
@@ -3064,49 +3396,62 @@ function ConnectionTypePicker({ options, value, onChange, placeholder }: {
                 style={{
                     position: "fixed",
                     left: menuRect.left,
+                    top: menuRect.top,
                     width: menuRect.width,
-                    bottom: menuRect.bottom,
                     zIndex: 10051,
-                    background: "var(--background-floating, #111214)",
-                    borderRadius: 8,
-                    boxShadow: "0 8px 24px rgba(0, 0, 0, 0.45)",
-                    border: "1px solid var(--background-modifier-accent, #3f4147)",
+                    background: "var(--background-floating, var(--modal-background, #111214))",
+                    borderRadius: 12,
+                    boxShadow: "0 10px 28px rgba(0,0,0,0.5)",
                     overflow: "hidden",
+                    display: "flex",
+                    flexDirection: "column",
                 }}
             >
-                <ScrollerThin style={{ maxHeight: 240, padding: 6 }}>
+                <div style={{ padding: "10px 10px 8px" }}>
+                    <TextInput
+                        value={query}
+                        onChange={setQuery}
+                        placeholder={placeholder}
+                    />
+                </div>
+                <ScrollerThin style={{ maxHeight: 220, padding: "0 6px 8px" }}>
                     {filtered.length ? filtered.map(opt => (
-                        <div
+                        <button
                             key={opt.value}
+                            type="button"
                             onClick={() => pick(opt.value)}
                             style={{
                                 display: "flex",
                                 alignItems: "center",
                                 gap: 10,
-                                padding: "8px 10px",
-                                borderRadius: 4,
+                                width: "100%",
+                                padding: "9px 10px",
+                                borderRadius: 8,
+                                border: "none",
                                 cursor: "pointer",
+                                textAlign: "left",
                                 background: opt.value === value
                                     ? "var(--background-modifier-selected)"
                                     : "transparent",
+                                color: "var(--text-normal)",
                             }}
                             onMouseEnter={e => {
                                 if (opt.value !== value)
-                                    (e.currentTarget as HTMLDivElement).style.background = "var(--background-modifier-hover)";
+                                    (e.currentTarget as HTMLButtonElement).style.background = "var(--background-modifier-hover)";
                             }}
                             onMouseLeave={e => {
-                                (e.currentTarget as HTMLDivElement).style.background = opt.value === value
+                                (e.currentTarget as HTMLButtonElement).style.background = opt.value === value
                                     ? "var(--background-modifier-selected)"
                                     : "transparent";
                             }}
                         >
-                            <ConnectionPlatformIcon type={opt.value} size={20} />
-                            <Text variant="text-sm/normal">{opt.label}</Text>
-                        </div>
+                            <ConnectionPlatformIcon type={opt.value} size={22} />
+                            <Text variant="text-sm/medium">{opt.label}</Text>
+                        </button>
                     )) : (
                         <Text
                             variant="text-sm/normal"
-                            style={{ display: "block", padding: "10px 12px", color: "var(--text-muted)" }}
+                            style={{ display: "block", padding: "12px", color: "var(--text-muted)" }}
                         >
                             No matches
                         </Text>
@@ -3119,18 +3464,44 @@ function ConnectionTypePicker({ options, value, onChange, placeholder }: {
 
     return (
         <>
-            <div ref={anchorRef} style={{ width: "100%" }}>
-                <TextInput
-                    value={open ? query : (selected?.label ?? "")}
-                    onChange={v => {
-                        if (!open) openPicker();
-                        setQuery(v);
-                        if (value) onChange(null);
-                    }}
-                    onFocus={openPicker}
-                    placeholder={placeholder}
-                />
-            </div>
+            <button
+                ref={anchorRef}
+                type="button"
+                onClick={() => open ? closePicker() : openPicker()}
+                style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 10,
+                    width: "100%",
+                    padding: "10px 12px",
+                    borderRadius: 10,
+                    border: "none",
+                    background: "transparent",
+                    boxShadow: "0 1px 0 rgba(0,0,0,0.18), 0 4px 14px rgba(0,0,0,0.12)",
+                    cursor: "pointer",
+                    color: "var(--text-normal)",
+                    textAlign: "left",
+                }}
+            >
+                {selected ? (
+                    <ConnectionPlatformIcon type={selected.value} size={22} />
+                ) : (
+                    <div style={{
+                        width: 22,
+                        height: 22,
+                        borderRadius: 6,
+                        background: "var(--background-modifier-hover)",
+                        flexShrink: 0,
+                    }} />
+                )}
+                <Text
+                    variant="text-sm/medium"
+                    style={{ flex: 1, color: selected ? "var(--text-normal)" : "var(--text-muted)" }}
+                >
+                    {selected?.label ?? "Choose platform"}
+                </Text>
+                <span style={{ color: "var(--text-muted)", fontSize: 12 }}>{open ? "▴" : "▾"}</span>
+            </button>
             {menu}
         </>
     );
@@ -3147,17 +3518,24 @@ function ConnectionRow({ type, value, onChange, placeholder, disabled, actionLab
 }) {
     return (
         <div style={connectionRowStyle}>
-            <ConnectionPlatformIcon type={type} />
-            <TextInput
-                value={value}
-                onChange={onChange}
-                placeholder={placeholder}
-                disabled={disabled}
-                style={{ flex: 1, minWidth: 0 }}
-            />
-            <Button size="tiny" variant="secondary" onClick={onAction}>
-                {actionLabel}
-            </Button>
+            <ConnectionPlatformIcon type={type} size={26} />
+            <div style={{ flex: 1, minWidth: 0 }}>
+                <TextInput
+                    value={value}
+                    onChange={onChange}
+                    placeholder={placeholder}
+                    disabled={disabled}
+                />
+            </div>
+            <button
+                type="button"
+                className="vc-larp-icon-btn"
+                title={actionLabel}
+                aria-label={actionLabel}
+                onClick={onAction}
+            >
+                ×
+            </button>
         </div>
     );
 }
@@ -3237,185 +3615,188 @@ function ConnectionsSection() {
     const activeReal = realConnections.filter(c => !hiddenSet.has(connKey(c)));
     const hiddenReal = realConnections.filter(c => hiddenSet.has(connKey(c)));
 
-    const connectionList = (
-        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-            {!activeReal.length && !custom.length && !hiddenReal.length && (
-                <Forms.FormText style={{ margin: 0, color: "var(--text-muted)" }}>
-                    No linked accounts on your profile.
-                </Forms.FormText>
-            )}
+    return (
+        <div style={{ display: "flex", flexDirection: "column", gap: 12, maxHeight: MODAL_BODY_MAX_HEIGHT }}>
+            <ScrollerThin style={{ flex: 1, minHeight: 0, paddingRight: 4 }}>
+                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                    {!activeReal.length && !custom.length && !hiddenReal.length && (
+                        <Forms.FormText style={{ margin: "8px 0", color: "var(--text-muted)" }}>
+                            No linked accounts yet. Add one below.
+                        </Forms.FormText>
+                    )}
 
-            {activeReal.map(connection => {
-                const key = connKey(connection);
-                const override = overrides[key] ?? overrides[connection.type];
-                return (
-                    <ConnectionRow
-                        key={key}
-                        type={connection.type}
-                        value={override?.name ?? connection.name}
-                        onChange={v => updateOverride(key, v)}
-                        placeholder={connection.name}
-                        actionLabel="Remove"
-                        onAction={() => hideRealConnection(key)}
-                    />
-                );
-            })}
-
-            {custom.map(cc => (
-                <ConnectionRow
-                    key={cc.id}
-                    type={cc.type}
-                    value={cc.name}
-                    onChange={v => updateCustom(cc.id, v)}
-                    placeholder={connectionNeedsDomain(cc.type) ? "example.com" : "Handle"}
-                    actionLabel="Remove"
-                    onAction={() => removeCustom(cc.id)}
-                />
-            ))}
-
-            {hiddenReal.length > 0 && (
-                <div style={{ display: "flex", flexDirection: "column", gap: 4, marginTop: 2 }}>
-                    {hiddenReal.map(connection => {
+                    {activeReal.map(connection => {
                         const key = connKey(connection);
+                        const override = overrides[key] ?? overrides[connection.type];
                         return (
-                            <div
+                            <ConnectionRow
                                 key={key}
-                                style={{ display: "flex", alignItems: "center", gap: 8, padding: "2px 10px", opacity: 0.55 }}
-                            >
-                                <ConnectionPlatformIcon type={connection.type} size={20} />
-                                <Text variant="text-xs/normal" style={{ color: "var(--text-muted)", flex: 1 }}>
-                                    Hidden
-                                </Text>
-                                <Button size="tiny" variant="secondary" onClick={() => restoreRealConnection(key)}>
-                                    Restore
-                                </Button>
-                            </div>
+                                type={connection.type}
+                                value={override?.name ?? connection.name}
+                                onChange={v => updateOverride(key, v)}
+                                placeholder={connection.name}
+                                actionLabel="Hide"
+                                onAction={() => hideRealConnection(key)}
+                            />
                         );
                     })}
-                </div>
-            )}
-        </div>
-    );
 
-    const addConnectionRow = availableTypes.length > 0 ? (
-        <div style={{
-            ...connectionRowStyle,
-            flexDirection: "column",
-            alignItems: "stretch",
-            gap: 10,
-            flexShrink: 0,
-        }}>
-            <Text variant="text-xs/medium" style={{ ...sectionTitleStyle, marginBottom: 0 }}>
-                Add connection
-            </Text>
-            <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-                {pickType ? (
-                    <ConnectionPlatformIcon type={pickType} size={24} />
-                ) : (
-                    <div style={{ width: 24, flexShrink: 0 }} />
-                )}
-                <div style={{ flex: "1 1 160px", minWidth: 140 }}>
+                    {custom.map(cc => (
+                        <ConnectionRow
+                            key={cc.id}
+                            type={cc.type}
+                            value={cc.name}
+                            onChange={v => updateCustom(cc.id, v)}
+                            placeholder={connectionNeedsDomain(cc.type) ? "example.com" : "Handle"}
+                            actionLabel="Remove"
+                            onAction={() => removeCustom(cc.id)}
+                        />
+                    ))}
+
+                    {hiddenReal.length > 0 && (
+                        <div style={{ marginTop: 8 }}>
+                            <div style={sectionTitleStyle}>Hidden</div>
+                            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                                {hiddenReal.map(connection => {
+                                    const key = connKey(connection);
+                                    return (
+                                        <div
+                                            key={key}
+                                            style={{
+                                                ...connectionRowStyle,
+                                                opacity: 0.7,
+                                                padding: "8px 12px",
+                                            }}
+                                        >
+                                            <ConnectionPlatformIcon type={connection.type} size={22} />
+                                            <Text variant="text-sm/normal" style={{ color: "var(--text-muted)", flex: 1 }}>
+                                                {connection.name}
+                                            </Text>
+                                            <Button size="tiny" variant="secondary" onClick={() => restoreRealConnection(key)}>
+                                                Restore
+                                            </Button>
+                                        </div>
+                                    );
+                                })}
+                            </div>
+                        </div>
+                    )}
+                </div>
+            </ScrollerThin>
+
+            {availableTypes.length > 0 && (
+                <div style={{
+                    ...cardStyle,
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: 10,
+                    flexShrink: 0,
+                }}>
+                    <Text variant="text-xs/medium" style={{ ...sectionTitleStyle, marginBottom: 0 }}>
+                        Add connection
+                    </Text>
                     <ConnectionTypePicker
                         options={availableTypes}
                         value={pickType}
-                        onChange={setPickType}
+                        onChange={v => {
+                            setPickType(v);
+                            setNewName("");
+                        }}
                         placeholder="Search platforms..."
                     />
+                    {pickType && (
+                        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                            <div style={{ flex: 1, minWidth: 0 }}>
+                                <TextInput
+                                    value={newName}
+                                    onChange={setNewName}
+                                    placeholder={connectionNeedsDomain(pickType) ? "example.com" : "Handle"}
+                                />
+                            </div>
+                            <Button
+                                size="small"
+                                variant="primary"
+                                disabled={!newName.trim()}
+                                onClick={addCustom}
+                            >
+                                Add
+                            </Button>
+                        </div>
+                    )}
                 </div>
-                {pickType && (
-                    <div style={{ flex: "1 1 120px", minWidth: 100 }}>
-                        <TextInput
-                            value={newName}
-                            onChange={setNewName}
-                            placeholder={connectionNeedsDomain(pickType) ? "example.com" : "Handle"}
-                        />
-                    </div>
-                )}
-                <Button
-                    size="small"
-                    variant="primary"
-                    disabled={!pickType || !newName.trim()}
-                    onClick={addCustom}
-                >
-                    Add
-                </Button>
-            </div>
-        </div>
-    ) : null;
-
-    return (
-        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-            <ScrollerThin style={{ maxHeight: "calc(58vh - 140px)", paddingRight: 4, flexShrink: 1 }}>
-                {connectionList}
-            </ScrollerThin>
-            {addConnectionRow}
+            )}
         </div>
     );
 }
 
-function BadgeSection({ title, badges, owned, search }: {
+function BadgeSection({ title, badges, emptyLabel, onBadgeClick, isActive, isLocked, isMuted }: {
     title: string;
     badges: BadgeEntry[];
-    owned: boolean;
-    search?: string;
+    emptyLabel?: string;
+    onBadgeClick: (badge: BadgeEntry) => void;
+    isActive: (badge: BadgeEntry) => boolean;
+    isLocked?: (badge: BadgeEntry) => boolean;
+    isMuted?: (badge: BadgeEntry) => boolean;
 }) {
-    const q = search?.trim().toLowerCase();
-    const filtered = q
-        ? badges.filter(b => b.description.toLowerCase().includes(q) || b.id.toLowerCase().includes(q))
-        : badges;
-
     if (!badges.length) {
-        if (!owned) return null;
         return (
-            <div style={{ marginBottom: 24 }}>
+            <div style={{ marginBottom: 12 }}>
                 <div style={sectionTitleStyle}>{title}</div>
                 <Forms.FormText style={{ margin: 0, color: "var(--text-muted)" }}>
-                    Loading your badges… try reopening if this stays empty.
+                    {emptyLabel ?? "Nothing here."}
                 </Forms.FormText>
             </div>
         );
     }
 
-    const countLabel = filtered.length !== badges.length
-        ? `${filtered.length}/${badges.length}`
-        : String(badges.length);
-
     return (
-        <div style={{ marginBottom: 24 }}>
+        <div style={{ marginBottom: 12 }}>
             <div style={sectionTitleStyle}>
                 {title}
-                <span style={{ marginLeft: 8, opacity: 0.55, fontWeight: 600 }}>{countLabel}</span>
+                <span style={{ marginLeft: 8, opacity: 0.5, fontWeight: 600 }}>{badges.length}</span>
             </div>
-            {!filtered.length ? (
-                <Forms.FormText style={{ margin: 0, color: "var(--text-muted)" }}>No badges match your search.</Forms.FormText>
-            ) : (
-                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                    {filtered.map(badge => (
+            <div style={{
+                display: "grid",
+                gridTemplateColumns: "repeat(auto-fill, minmax(88px, 1fr))",
+                gap: 8,
+            }}>
+                {badges.map(badge => {
+                    const locked = isLocked?.(badge) ?? false;
+                    return (
                         <BadgeRow
                             key={badge.id}
                             badge={badge}
-                            owned={owned}
-                            visible={owned ? isOwnedBadgeVisible(badge.id) : isAddedBadgeVisible(badge.id)}
-                            disabled={!owned && isBadgeExclusiveBlocked(badge.id)}
-                            onChange={visible => {
-                                if (owned) setOwnedBadgeVisible(badge.id, visible);
-                                else setAddedBadgeVisible(badge.id, visible);
+                            active={isActive(badge)}
+                            locked={locked}
+                            muted={isMuted?.(badge)}
+                            onClick={() => {
+                                if (!locked) onBadgeClick(badge);
                             }}
                         />
-                    ))}
-                </div>
-            )}
+                    );
+                })}
+            </div>
         </div>
     );
 }
 
-function buildPreviewUrlCandidates(src: string, staticOnly = false) {
+function buildPreviewUrlCandidates(src: string, staticOnly = false, assetHint?: string) {
     const normalized = absolutizeCollectibleUrl(src);
-    if (!normalized) return [] as string[];
-    const urls = [normalized];
-    if (!staticOnly) {
+    const urls: string[] = [];
+
+    if (assetHint && (assetHint.includes("nameplates") || src.includes("nameplates") || src.includes("/assets/collectibles/"))) {
+        urls.push(...resolveNameplateAssetCandidates(assetHint.includes("nameplates") ? assetHint : src.replace(/^.*\/assets\/collectibles\//, "").replace(/static\.png$/, "")));
+    }
+
+    if (normalized) urls.push(normalized);
+
+    if (!staticOnly && normalized) {
         if (normalized.includes("/static")) urls.push(normalized.replace(/\/static(?=$|\?|\/)/, "/animated"));
         if (normalized.includes("/animated")) urls.push(normalized.replace(/\/animated(?=$|\?|\/)/, "/video"));
+        if (normalized.endsWith("static.png")) {
+            urls.push(normalized.replace(/static\.png$/, "img.png"));
+            urls.push(normalized.replace(/static\.png$/, "asset.webm"));
+        }
     }
     if (normalized.includes("avatar-decoration-presets") && !normalized.includes("size=")) {
         urls.push(`${normalized}${normalized.includes("?") ? "&" : "?"}size=96&passthrough=true`);
@@ -3433,13 +3814,15 @@ function DecorationPreviewImage({
     eager,
     staticOnly,
     wide,
+    assetHint,
 }: {
     src: string;
     eager?: boolean;
     staticOnly?: boolean;
     wide?: boolean;
+    assetHint?: string;
 }) {
-    const candidates = buildPreviewUrlCandidates(src, staticOnly);
+    const candidates = buildPreviewUrlCandidates(src, staticOnly, assetHint);
     const [candidateIndex, setCandidateIndex] = useState(0);
     const [loaded, setLoaded] = useState(false);
     const activeSrc = candidates[candidateIndex] ?? "";
@@ -3447,7 +3830,7 @@ function DecorationPreviewImage({
     useEffect(() => {
         setCandidateIndex(0);
         setLoaded(!activeSrc || preloadedDecorationUrls.has(activeSrc));
-    }, [src]);
+    }, [src, assetHint]);
 
     useEffect(() => {
         if (!activeSrc) return;
@@ -3509,6 +3892,98 @@ function DecorationPreviewImage({
     );
 }
 
+function DecorationSkeletonGrid({ wide }: { wide?: boolean }) {
+    return (
+        <div style={{
+            display: "grid",
+            gridTemplateColumns: "repeat(auto-fill, minmax(76px, 1fr))",
+            gap: 8,
+        }}>
+            {Array.from({ length: DECORATION_BROWSE_LIMIT }, (_, i) => (
+                <div
+                    key={i}
+                    className="vc-larp-skeleton"
+                    style={{ height: wide ? 68 : 88 }}
+                />
+            ))}
+        </div>
+    );
+}
+
+function EquippedDecorationCard({
+    label,
+    previewUrl,
+    assetHint,
+    wide,
+    onClear,
+}: {
+    label: string;
+    previewUrl?: string | null;
+    assetHint?: string;
+    wide?: boolean;
+    onClear: () => void;
+}) {
+    return (
+        <div style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 12,
+            marginBottom: 12,
+            padding: "10px 12px",
+            borderRadius: 12,
+            background: "transparent",
+            boxShadow: "0 1px 0 rgba(0,0,0,0.18), 0 4px 14px rgba(0,0,0,0.12)",
+        }}>
+            <div style={{
+                width: wide ? 96 : 52,
+                height: wide ? 32 : 52,
+                borderRadius: wide ? 6 : 10,
+                overflow: "hidden",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                flexShrink: 0,
+                background: "var(--background-modifier-hover)",
+            }}>
+                {previewUrl ? (
+                    <DecorationPreviewImage
+                        src={previewUrl}
+                        eager
+                        wide={wide}
+                        assetHint={assetHint}
+                    />
+                ) : (
+                    <div className="vc-larp-skeleton" style={{ width: "100%", height: "100%" }} />
+                )}
+            </div>
+            <div style={{ flex: 1, minWidth: 0 }}>
+                <Text
+                    variant="text-sm/semibold"
+                    style={{
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                        whiteSpace: "nowrap",
+                    }}
+                >
+                    {label}
+                </Text>
+                <Text variant="text-xs/normal" style={{ color: "var(--text-muted)" }}>
+                    Equipped
+                </Text>
+            </div>
+            <button
+                type="button"
+                className="vc-larp-icon-btn"
+                title="Unequip"
+                aria-label="Unequip"
+                onClick={onClear}
+            >
+                ×
+            </button>
+        </div>
+    );
+}
+
 function DecorationGrid({
     items,
     selectedSkuId,
@@ -3517,16 +3992,20 @@ function DecorationGrid({
     staticOnlyPreview,
     widePreview,
 }: {
-    items: Array<{ skuId: string; name: string; previewUrl: string; }>;
+    items: Array<{ skuId: string; name: string; previewUrl: string; asset?: string; }>;
     selectedSkuId: string | null;
     onSelect: (skuId: string) => void;
     emptyLabel: string;
     staticOnlyPreview?: boolean;
     widePreview?: boolean;
 }) {
-    const previewKey = items.map(i => i.skuId).join(",");
+    const previewKey = items.map(i => `${i.skuId}:${i.previewUrl}`).join(",");
     useEffect(() => {
-        preloadDecorationUrls(items.map(i => i.previewUrl).filter(Boolean));
+        const urls = items.flatMap(i => {
+            if (i.asset && i.asset.includes("nameplates")) return resolveNameplateAssetCandidates(i.asset);
+            return i.previewUrl ? [i.previewUrl] : [];
+        });
+        preloadDecorationUrls(urls.filter(Boolean));
     }, [previewKey]);
 
     if (!items.length) {
@@ -3560,12 +4039,13 @@ function DecorationGrid({
                             borderRadius: 10,
                             border: selected
                                 ? "2px solid var(--brand-experiment-560)"
-                                : "1px solid var(--background-modifier-accent)",
-                            background: selected
-                                ? "var(--background-modifier-selected)"
-                                : "var(--background-tertiary)",
+                                : "2px solid transparent",
+                            background: "transparent",
+                            boxShadow: selected
+                                ? "0 2px 10px rgba(0,0,0,0.28)"
+                                : "0 1px 0 rgba(0,0,0,0.18), 0 4px 14px rgba(0,0,0,0.12)",
                             cursor: "pointer",
-                            minHeight: widePreview ? 72 : 92,
+                            minHeight: widePreview ? 68 : 88,
                         }}
                     >
                         <DecorationPreviewImage
@@ -3573,6 +4053,7 @@ function DecorationGrid({
                             eager={index < DECORATION_BROWSE_LIMIT}
                             staticOnly={staticOnlyPreview}
                             wide={widePreview}
+                            assetHint={item.asset}
                         />
                         <Text
                             variant="text-xxs/normal"
@@ -3681,6 +4162,10 @@ function DecorationsSection() {
             void searchShopDecorations(q, itemType).then(results => {
                 if (!alive) return;
                 shopSearchCache.set(cacheKey, results);
+                if (shopSearchCache.size > SHOP_SEARCH_CACHE_MAX) {
+                    const oldest = shopSearchCache.keys().next().value;
+                    if (oldest) shopSearchCache.delete(oldest);
+                }
                 setSearchResults(prev => ({ ...prev, [activeKey]: results as typeof prev[typeof activeKey] }));
                 setSearching(false);
             });
@@ -3719,21 +4204,32 @@ function DecorationsSection() {
             ? "Search banner effects..."
             : "Search nameplates...";
 
+    const equippedAvatar = settings.store.larpAvatarDecoration;
+    const equippedBanner = settings.store.larpProfileEffect;
+    const equippedNameplate = settings.store.larpNameplate;
+    const showSkeleton = loading || searching;
+
     return (
         <div>
-            <TabBar
-                type="top"
-                look="brand"
-                selectedItem={subTab}
-                onItemSelect={setSubTab}
-                style={{ marginBottom: 12 }}
-            >
-                <TabBar.Item id={DecorationSubTabs.Avatar}>Avatar</TabBar.Item>
-                <TabBar.Item id={DecorationSubTabs.Banner}>Banner</TabBar.Item>
-                <TabBar.Item id={DecorationSubTabs.Nameplate}>Nameplate</TabBar.Item>
-            </TabBar>
+            <div className="vc-larp-seg">
+                {([
+                    [DecorationSubTabs.Avatar, "Avatar"],
+                    [DecorationSubTabs.Banner, "Banner"],
+                    [DecorationSubTabs.Nameplate, "Nameplate"],
+                ] as const).map(([id, label]) => (
+                    <button
+                        key={id}
+                        type="button"
+                        className="vc-larp-seg-btn"
+                        data-active={subTab === id}
+                        onClick={() => setSubTab(id)}
+                    >
+                        {label}
+                    </button>
+                ))}
+            </div>
 
-            <div style={{ marginBottom: 14 }}>
+            <div style={{ marginBottom: 12 }}>
                 <TextInput
                     value={search}
                     onChange={setSearch}
@@ -3741,138 +4237,148 @@ function DecorationsSection() {
                 />
             </div>
 
-            {loading ? (
-                <Forms.FormText style={{ margin: 0, color: "var(--text-muted)" }}>
-                    Loading shop catalog…
-                </Forms.FormText>
-            ) : searching ? (
-                <Forms.FormText style={{ margin: 0, color: "var(--text-muted)" }}>
-                    Searching shop…
-                </Forms.FormText>
-            ) : (
-                <div key={subTab} className="vc-larp-tab-panel">
-                    {subTab === DecorationSubTabs.Avatar && (
-                        <>
-                            {!q && avatarTotal > DECORATION_BROWSE_LIMIT && (
-                                <Forms.FormText style={{ margin: "0 0 12px", color: "var(--text-muted)" }}>
-                                    Showing {avatarItems.length} of {avatarTotal}. Search to find more.
-                                </Forms.FormText>
-                            )}
-                            {selectedAvatarSku && (
-                                <div style={{ ...cardStyle, marginBottom: 12, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-                                    <Text variant="text-sm/normal" style={{ color: "var(--text-muted)" }}>
-                                        Equipped: {settings.store.larpAvatarDecoration?.label ?? "Avatar decoration"}
-                                    </Text>
-                                    <Button size="tiny" variant="secondary" onClick={() => equipAvatarDecoration(null)}>
-                                        Remove
-                                    </Button>
-                                </div>
-                            )}
-                            <DecorationGrid
-                                items={avatarItems}
-                                selectedSkuId={selectedAvatarSku}
-                                onSelect={skuId => {
-                                    if (selectedAvatarSku === skuId) {
-                                        equipAvatarDecoration(null);
-                                        return;
-                                    }
-                                    const item = avatarCatalog.find(i => i.skuId === skuId)
-                                        ?? shop.avatar.find(i => i.skuId === skuId);
-                                    if (item) equipAvatarDecoration(item);
-                                }}
-                                emptyLabel={q
-                                    ? "No avatar decorations match your search."
-                                    : "No avatar decorations found. Try reopening the tab."}
+            <div key={subTab} className="vc-larp-tab-panel">
+                {subTab === DecorationSubTabs.Avatar && (
+                    <>
+                        {equippedAvatar && (
+                            <EquippedDecorationCard
+                                label={equippedAvatar.label ?? "Avatar decoration"}
+                                previewUrl={equippedAvatar.previewUrl
+                                    ?? resolveAvatarDecorationPreviewUrl(equippedAvatar.skuId, equippedAvatar.asset)}
+                                onClear={() => equipAvatarDecoration(null)}
                             />
-                        </>
-                    )}
+                        )}
+                        {showSkeleton ? (
+                            <DecorationSkeletonGrid />
+                        ) : (
+                            <>
+                                {!q && avatarTotal > DECORATION_BROWSE_LIMIT && (
+                                    <Forms.FormText style={{ margin: "0 0 10px", color: "var(--text-muted)", fontSize: 12 }}>
+                                        Showing {avatarItems.length} of {avatarTotal}. Search to find more.
+                                    </Forms.FormText>
+                                )}
+                                <DecorationGrid
+                                    items={avatarItems}
+                                    selectedSkuId={selectedAvatarSku}
+                                    onSelect={skuId => {
+                                        if (selectedAvatarSku === skuId) {
+                                            equipAvatarDecoration(null);
+                                            return;
+                                        }
+                                        const item = avatarCatalog.find(i => i.skuId === skuId)
+                                            ?? shop.avatar.find(i => i.skuId === skuId);
+                                        if (item) equipAvatarDecoration(item);
+                                    }}
+                                    emptyLabel={q
+                                        ? "No avatar decorations match your search."
+                                        : "No avatar decorations found. Try reopening the tab."}
+                                />
+                            </>
+                        )}
+                    </>
+                )}
 
-                    {subTab === DecorationSubTabs.Banner && (
-                        <>
-                            {!q && bannerTotal > DECORATION_BROWSE_LIMIT && (
-                                <Forms.FormText style={{ margin: "0 0 12px", color: "var(--text-muted)" }}>
-                                    Showing {bannerItems.length} of {bannerTotal}. Search to find more.
-                                </Forms.FormText>
-                            )}
-                            {selectedBannerSku && (
-                                <div style={{ ...cardStyle, marginBottom: 12, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-                                    <Text variant="text-sm/normal" style={{ color: "var(--text-muted)" }}>
-                                        Equipped: {settings.store.larpProfileEffect?.title ?? "Profile effect"}
-                                    </Text>
-                                    <Button size="tiny" variant="secondary" onClick={() => equipProfileEffect(null)}>
-                                        Remove
-                                    </Button>
-                                </div>
-                            )}
-                            <DecorationGrid
-                                items={bannerItems}
-                                selectedSkuId={selectedBannerSku}
-                                staticOnlyPreview
-                                onSelect={skuId => {
-                                    if (selectedBannerSku === skuId) {
-                                        equipProfileEffect(null);
-                                        return;
-                                    }
-                                    const item = bannerCatalog.find(i => i.skuId === skuId)
-                                        ?? shop.banner.find(i => i.skuId === skuId);
-                                    if (item) equipProfileEffect(item);
-                                }}
-                                emptyLabel={q
-                                    ? "No banner effects match your search."
-                                    : "No banner effects found. Try reopening the tab."}
+                {subTab === DecorationSubTabs.Banner && (
+                    <>
+                        {equippedBanner && (
+                            <EquippedDecorationCard
+                                label={equippedBanner.title ?? "Profile effect"}
+                                previewUrl={
+                                    equippedBanner.thumbnailPreviewSrc
+                                    ?? equippedBanner.staticFrameSrc
+                                    ?? equippedBanner.reducedMotionSrc
+                                    ?? shop.banner.find(i => i.skuId === equippedBanner.skuId)?.previewUrl
+                                    ?? null
+                                }
+                                onClear={() => equipProfileEffect(null)}
                             />
-                        </>
-                    )}
+                        )}
+                        {showSkeleton ? (
+                            <DecorationSkeletonGrid />
+                        ) : (
+                            <>
+                                {!q && bannerTotal > DECORATION_BROWSE_LIMIT && (
+                                    <Forms.FormText style={{ margin: "0 0 10px", color: "var(--text-muted)", fontSize: 12 }}>
+                                        Showing {bannerItems.length} of {bannerTotal}. Search to find more.
+                                    </Forms.FormText>
+                                )}
+                                <DecorationGrid
+                                    items={bannerItems}
+                                    selectedSkuId={selectedBannerSku}
+                                    onSelect={skuId => {
+                                        if (selectedBannerSku === skuId) {
+                                            equipProfileEffect(null);
+                                            return;
+                                        }
+                                        const item = bannerCatalog.find(i => i.skuId === skuId)
+                                            ?? shop.banner.find(i => i.skuId === skuId);
+                                        if (item) equipProfileEffect(item);
+                                    }}
+                                    emptyLabel={q
+                                        ? "No banner effects match your search."
+                                        : "No banner effects found. Try reopening the tab."}
+                                />
+                            </>
+                        )}
+                    </>
+                )}
 
-                    {subTab === DecorationSubTabs.Nameplate && (
-                        <>
-                            {!q && nameplateTotal > DECORATION_BROWSE_LIMIT && (
-                                <Forms.FormText style={{ margin: "0 0 12px", color: "var(--text-muted)" }}>
-                                    Showing {nameplateItems.length} of {nameplateTotal}. Search to find more.
-                                </Forms.FormText>
-                            )}
-                            {selectedNameplateSku && (
-                                <div style={{ ...cardStyle, marginBottom: 12, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-                                    <Text variant="text-sm/normal" style={{ color: "var(--text-muted)" }}>
-                                        Equipped: {settings.store.larpNameplate?.label ?? "Nameplate"}
-                                    </Text>
-                                    <Button size="tiny" variant="secondary" onClick={() => equipNameplate(null)}>
-                                        Remove
-                                    </Button>
-                                </div>
-                            )}
-                            <DecorationGrid
-                                items={nameplateItems}
-                                selectedSkuId={selectedNameplateSku}
-                                widePreview
-                                onSelect={skuId => {
-                                    if (selectedNameplateSku === skuId) {
-                                        equipNameplate(null);
-                                        return;
-                                    }
-                                    const item = nameplateCatalog.find(i => i.skuId === skuId)
-                                        ?? shop.nameplate.find(i => i.skuId === skuId);
-                                    if (item) equipNameplate(item);
-                                }}
-                                emptyLabel={q
-                                    ? "No nameplates match your search."
-                                    : "No nameplates found. Try reopening the tab."}
+                {subTab === DecorationSubTabs.Nameplate && (
+                    <>
+                        {equippedNameplate && (
+                            <EquippedDecorationCard
+                                label={equippedNameplate.label ?? "Nameplate"}
+                                previewUrl={equippedNameplate.previewUrl
+                                    ?? (equippedNameplate.asset
+                                        ? resolveNameplatePreviewUrl(equippedNameplate.asset)
+                                        : null)}
+                                assetHint={equippedNameplate.asset}
+                                wide
+                                onClear={() => equipNameplate(null)}
                             />
-                        </>
-                    )}
-                </div>
-            )}
+                        )}
+                        {showSkeleton ? (
+                            <DecorationSkeletonGrid wide />
+                        ) : (
+                            <>
+                                {!q && nameplateTotal > DECORATION_BROWSE_LIMIT && (
+                                    <Forms.FormText style={{ margin: "0 0 10px", color: "var(--text-muted)", fontSize: 12 }}>
+                                        Showing {nameplateItems.length} of {nameplateTotal}. Search to find more.
+                                    </Forms.FormText>
+                                )}
+                                <DecorationGrid
+                                    items={nameplateItems}
+                                    selectedSkuId={selectedNameplateSku}
+                                    widePreview
+                                    onSelect={skuId => {
+                                        if (selectedNameplateSku === skuId) {
+                                            equipNameplate(null);
+                                            return;
+                                        }
+                                        const item = nameplateCatalog.find(i => i.skuId === skuId)
+                                            ?? shop.nameplate.find(i => i.skuId === skuId);
+                                        if (item) equipNameplate(item);
+                                    }}
+                                    emptyLabel={q
+                                        ? "No nameplates match your search."
+                                        : "No nameplates found. Try reopening the tab."}
+                                />
+                            </>
+                        )}
+                    </>
+                )}
+            </div>
         </div>
     );
 }
 
 function CreditsSection() {
     return (
-        <div style={{ ...cardStyle, textAlign: "center", padding: "24px 16px" }}>
-            <Text variant="text-md/medium" style={{ color: "var(--header-primary)", marginBottom: 6 }}>
+        <div style={{ ...cardStyle, textAlign: "center", padding: "28px 16px" }}>
+            <Text variant="text-md/semibold" style={{ color: "var(--header-primary)", marginBottom: 4 }}>
                 Larp Tool
             </Text>
-            <Forms.FormText style={{ margin: "0 0 14px", color: "var(--text-muted)" }}>
+            <Forms.FormText style={{ margin: "0 0 12px", color: "var(--text-muted)" }}>
                 Client-side profile larp for Vencord
             </Forms.FormText>
             <a
@@ -3889,7 +4395,7 @@ function CreditsSection() {
             >
                 github.com/sp5-y/discord-larp-plugin
             </a>
-            <Forms.FormText style={{ margin: "10px 0 0", color: "var(--text-muted)", fontSize: 11 }}>
+            <Forms.FormText style={{ margin: "12px 0 0", color: "var(--text-muted)", fontSize: 11 }}>
                 made by sp5 · Ctrl+B
             </Forms.FormText>
         </div>
@@ -3898,12 +4404,17 @@ function CreditsSection() {
 
 const BadgeModal = ErrorBoundary.wrap(function BadgeModal(props: RenderModalProps) {
     const [tab, setTab] = useState<number>(ModalTabs.Username);
-    const [search, setSearch] = useState("");
     const [profileReady, setProfileReady] = useState(false);
 
     useEffect(() => {
         ensureTabAnimStyles();
         let alive = true;
+        const userId = getCurrentUserId();
+        const alreadyHaveProfile = !!(userId && (origGetUserProfile?.(userId) ?? UserProfileStore.getUserProfile(userId)));
+        if (alreadyHaveProfile) {
+            setProfileReady(true);
+            return () => { alive = false; };
+        }
         void refreshOwnProfile().finally(() => {
             if (alive) setProfileReady(true);
         });
@@ -3927,6 +4438,11 @@ const BadgeModal = ErrorBoundary.wrap(function BadgeModal(props: RenderModalProp
         [UserProfileStore, UserStore],
         () => getModalBadgeLists()
     );
+
+    const spoofedBadges = other.filter(b => isAddedBadgeVisible(b.id));
+    const yourBadgeList = [...yours, ...spoofedBadges];
+    const addBadgeList = other.filter(b => !isAddedBadgeVisible(b.id));
+    const ownedIds = new Set(yours.map(b => b.id));
 
     return (
         <Modal
@@ -3961,6 +4477,7 @@ const BadgeModal = ErrorBoundary.wrap(function BadgeModal(props: RenderModalProp
                     <TabBar.Item id={ModalTabs.Username}>Username</TabBar.Item>
                     <TabBar.Item id={ModalTabs.Badges}>Badges</TabBar.Item>
                     <TabBar.Item id={ModalTabs.Decorations}>Decorations</TabBar.Item>
+                    <TabBar.Item id={ModalTabs.MemberSince}>Joined</TabBar.Item>
                     <TabBar.Item id={ModalTabs.Connections}>Connections</TabBar.Item>
                     <TabBar.Item id={ModalTabs.Credits}>Credits</TabBar.Item>
                 </TabBar>
@@ -3970,59 +4487,66 @@ const BadgeModal = ErrorBoundary.wrap(function BadgeModal(props: RenderModalProp
                         <ConnectionsSection />
                     </div>
                 ) : (
-                    <ScrollerThin style={{ maxHeight: "58vh", paddingTop: 2 }}>
+                    <ScrollerThin style={{ maxHeight: MODAL_BODY_MAX_HEIGHT, paddingTop: 2 }}>
                         <div key={tab} className="vc-larp-tab-panel">
                             {tab === ModalTabs.Username && (
-                                <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-                                    <div style={cardStyle}>
-                                        <Text variant="text-xs/medium" style={{ ...sectionTitleStyle, marginBottom: 8 }}>
-                                            Custom username
-                                        </Text>
-                                        <TextInput
-                                            value={settings.store.customUsername}
-                                            onChange={v => {
-                                                settings.store.customUsername = v;
-                                                triggerProfileRefresh(200);
-                                            }}
-                                            placeholder="Your @username"
-                                            maxLength={32}
-                                        />
-                                    </div>
-                                    <div style={cardStyle}>
-                                        <Text variant="text-xs/medium" style={{ ...sectionTitleStyle, marginBottom: 8 }}>
-                                            Member since
-                                        </Text>
-                                        <TextInput
-                                            value={settings.store.customJoinDate}
-                                            onChange={v => {
-                                                settings.store.customJoinDate = v;
-                                                triggerProfileRefresh(200);
-                                            }}
-                                            placeholder="YYYY-MM-DD (leave empty for real)"
-                                            maxLength={10}
-                                        />
-                                        <Forms.FormText style={{ margin: "8px 0 0", color: "var(--text-muted)", fontSize: 12 }}>
-                                            Spoofs the account Member Since date on your profile.
-                                        </Forms.FormText>
-                                    </div>
-                                </div>
+                                <FieldCard label="Custom username" hint="Shown as your @handle in profiles and messages.">
+                                    <TextInput
+                                        value={settings.store.customUsername}
+                                        onChange={v => {
+                                            settings.store.customUsername = v;
+                                            triggerProfileRefresh(200);
+                                        }}
+                                        placeholder="Your @username"
+                                        maxLength={32}
+                                    />
+                                </FieldCard>
                             )}
 
                             {tab === ModalTabs.Badges && (
                                 <div>
-                                    <div style={{ marginBottom: 16 }}>
-                                        <TextInput
-                                            value={search}
-                                            onChange={setSearch}
-                                            placeholder="Search badges..."
-                                        />
-                                    </div>
-                                    <BadgeSection title="Your Badges" badges={yours} owned search={search} />
-                                    <BadgeSection title="Add Badges" badges={other} owned={false} search={search} />
+                                    <BadgeSection
+                                        title="Your Badges"
+                                        badges={yourBadgeList}
+                                        emptyLabel="No badges yet."
+                                        isActive={badge => ownedIds.has(badge.id)
+                                            ? isOwnedBadgeVisible(badge.id)
+                                            : true}
+                                        isMuted={badge => ownedIds.has(badge.id) && !isOwnedBadgeVisible(badge.id)}
+                                        onBadgeClick={badge => {
+                                            if (ownedIds.has(badge.id)) {
+                                                setOwnedBadgeVisible(badge.id, !isOwnedBadgeVisible(badge.id));
+                                            } else {
+                                                setAddedBadgeVisible(badge.id, false);
+                                            }
+                                        }}
+                                    />
+                                    <BadgeSection
+                                        title="Add Badges"
+                                        badges={addBadgeList}
+                                        emptyLabel="Nothing left to add."
+                                        isActive={() => false}
+                                        isLocked={badge => isBadgeExclusiveBlocked(badge.id)}
+                                        onBadgeClick={badge => setAddedBadgeVisible(badge.id, true)}
+                                    />
                                 </div>
                             )}
 
                             {tab === ModalTabs.Decorations && <DecorationsSection />}
+
+                            {tab === ModalTabs.MemberSince && (
+                                <FieldCard label="Member since" hint="Overrides the date shown on your profile. Use YYYY-MM-DD.">
+                                    <TextInput
+                                        value={settings.store.customJoinDate}
+                                        onChange={v => {
+                                            settings.store.customJoinDate = v;
+                                            triggerProfileRefresh(200);
+                                        }}
+                                        placeholder="YYYY-MM-DD"
+                                        maxLength={10}
+                                    />
+                                </FieldCard>
+                            )}
 
                             {tab === ModalTabs.Credits && <CreditsSection />}
                         </div>
@@ -4156,11 +4680,34 @@ function patchProfileDomScope() {
         const userId = getCurrentUserId();
         if (!userId) return;
 
+        // Drop stale marks so other people's profiles never keep our hide scope
+        for (const el of document.querySelectorAll("[data-larp-user]")) {
+            delete (el as HTMLElement).dataset.larpUser;
+        }
+
         for (const el of document.querySelectorAll(
-            `[class*="userPopoutOuter"], [class*="userProfileModal"], [aria-label$=" profile popout"]`
+            `[class*="userPopoutOuter"], [class*="userProfileModal"], [class*="userProfileOuter"], [aria-label$=" profile popout"]`
         )) {
-            if (el.querySelector(`[href*="/users/${userId}"]`)) {
-                (el as HTMLElement).dataset.larpUser = userId;
+            const root = el as HTMLElement;
+            const rootUserId = root.getAttribute("data-user-id")
+                ?? root.querySelector(":scope > [data-user-id], :scope [data-user-id]")?.getAttribute("data-user-id");
+
+            // Only mark when the profile subject itself is the current user.
+            // Do not use "any link to /users/{id}" — mutuals/friends lists falsely match.
+            if (rootUserId === userId) {
+                root.dataset.larpUser = userId;
+                continue;
+            }
+
+            const avatarImgs = Array.from(root.querySelectorAll("img")).filter(img => {
+                const src = img.getAttribute("src") ?? "";
+                return src.includes("/avatars/") || src.includes("/embed/avatars/");
+            });
+            const firstAvatar = avatarImgs[0];
+            if (!firstAvatar) continue;
+            const src = firstAvatar.getAttribute("src") ?? "";
+            if (src.includes(`/avatars/${userId}/`) || src.includes(`/avatars/${userId}.`)) {
+                root.dataset.larpUser = userId;
             }
         }
 
@@ -4186,6 +4733,9 @@ function patchProfileDomScope() {
         cancelAnimationFrame(profileDomObserverRafId);
         profileDomObserver?.disconnect();
         profileDomObserver = null;
+        for (const el of document.querySelectorAll("[data-larp-user]")) {
+            delete (el as HTMLElement).dataset.larpUser;
+        }
     });
 }
 
@@ -4530,8 +5080,9 @@ export default definePlugin({
     mapEmbed,
     getBadgeIconSrc(badge: { userId?: string; id?: string; key?: string; icon?: string; iconSrc?: string; }) {
         const transparent = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7";
-        const ownerId = badge.userId ?? badgeProfileUserId;
-        if (settings.store.enabled && ownerId === getCurrentUserId() && isBadgeHiddenObject(badge)) {
+        // Require an explicit owner match — never use a global "last profile" fallback,
+        // or hiding your badge also blanks the same icon on everyone else's profile.
+        if (settings.store.enabled && badge.userId === getCurrentUserId() && isBadgeHiddenObject(badge)) {
             return transparent;
         }
         if (badge.iconSrc) return badge.iconSrc;
@@ -4580,6 +5131,19 @@ export default definePlugin({
             (mod: { Ay?: typeof ProfileEffectClass; default?: typeof ProfileEffectClass; }) => {
                 ProfileEffectClass = (mod.Ay ?? mod.default ?? mod) as typeof ProfileEffectClass;
                 syncLarpProfileEffectFromSettings();
+            },
+        );
+        // Discord renames this often — keep a looser fallback finder
+        waitFor(
+            filters.byCode("staticFrameSrc", "fromServer"),
+            (mod: { Ay?: typeof ProfileEffectClass; default?: typeof ProfileEffectClass; fromServer?: (body: unknown) => unknown; }) => {
+                if (ProfileEffectClass) return;
+                const candidate = (mod.Ay ?? mod.default ?? mod) as typeof ProfileEffectClass;
+                if (typeof (candidate as { fromServer?: unknown; })?.fromServer === "function"
+                    || typeof (candidate as { Ay?: { fromServer?: unknown; }; })?.Ay?.fromServer === "function") {
+                    ProfileEffectClass = candidate;
+                    syncLarpProfileEffectFromSettings();
+                }
             },
         );
 
