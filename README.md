@@ -45,7 +45,7 @@ set NOINJECT=1
 ## FAQ / troubleshooting
 
 ### Setup stuck on “enabling pnpm via corepack…”
-That means it is **not done** — corepack was hanging. Newer `auto-setup.bat` installs pnpm with `npm install -g pnpm@9` instead.
+That means it is **not done**, corepack was hanging. Newer `auto-setup.bat` installs pnpm with `npm install -g pnpm@9` instead.
 
 If it still hangs:
 1. Close the window
