@@ -159,10 +159,18 @@ exit /b 0
 if exist "%VENCORD_DIR%\.git" (
     echo [..] updating Vencord repo...
     pushd "%VENCORD_DIR%"
-    call git pull --ff-only
+    set "GIT_ASK_YESNO=false"
+    set "GIT_TERMINAL_PROMPT=0"
+    call git -c core.fsmonitor=false -c gc.auto=0 fetch --prune --quiet
+    call git -c core.fsmonitor=false -c gc.auto=0 merge --ff-only origin/main
     set "ERR=!ERRORLEVEL!"
+    if not "!ERR!"=="0" (
+        echo [WARN] ff-only merge failed, trying pull...
+        call git -c core.fsmonitor=false -c gc.auto=0 pull --ff-only --no-rebase
+        set "ERR=!ERRORLEVEL!"
+    )
     popd
-    if not "!ERR!"=="0" echo [WARN] git pull failed, using existing copy
+    if not "!ERR!"=="0" echo [WARN] git update failed, using existing copy
     echo [OK] Vencord at %VENCORD_DIR%
     exit /b 0
 )
@@ -233,14 +241,14 @@ if not defined KEEP_DISCORD_OPEN (
 pushd "%VENCORD_DIR%"
 if defined DISCORD_LOCATION (
     echo      target: %DISCORD_LOCATION%
-    echo [..] unpatching existing Vencord install if present...
-    call node scripts/runInstaller.mjs -- --uninstall --location "%DISCORD_LOCATION%"
+    echo [..] trying uninstall first ^(safe to ignore rename errors^)...
+    call node scripts/runInstaller.mjs -- --uninstall --location "%DISCORD_LOCATION%" >nul 2>&1
     echo [..] installing custom build...
     call node scripts/runInstaller.mjs -- --install --location "%DISCORD_LOCATION%"
 ) else (
     echo      branch: %DISCORD_BRANCH%
-    echo [..] unpatching existing Vencord install if present...
-    call node scripts/runInstaller.mjs -- --uninstall --branch %DISCORD_BRANCH%
+    echo [..] trying uninstall first ^(safe to ignore rename errors^)...
+    call node scripts/runInstaller.mjs -- --uninstall --branch %DISCORD_BRANCH% >nul 2>&1
     echo [..] installing custom build...
     call node scripts/runInstaller.mjs -- --install --branch %DISCORD_BRANCH%
 )

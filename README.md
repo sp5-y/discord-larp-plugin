@@ -45,7 +45,7 @@ set NOINJECT=1
 ## FAQ / troubleshooting
 
 ### Setup stuck on “enabling pnpm via corepack…”
-That means it is **not done**, corepack was hanging. Newer `auto-setup.bat` installs pnpm with `npm install -g pnpm@9` instead.
+That means it is **not done** — corepack was hanging. Newer `auto-setup.bat` installs pnpm with `npm install -g pnpm@9` instead.
 
 If it still hangs:
 1. Close the window
@@ -89,9 +89,10 @@ Discord itself is still heavy; the plugin should no longer pile on as much.
 
 | Tab | What it does |
 |---|---|
-| **Username** | Custom `@username` + Member Since date |
-| **Badges** | Search, hide owned badges, add fake ones |
+| **Username** | Custom `@username` |
+| **Badges** | Hide owned badges, add fake ones |
 | **Decorations** | Avatar / Banner (profile effect) / Nameplate |
+| **Joined** | Spoof Member Since date (`YYYY-MM-DD`) |
 | **Connections** | Override, hide, or add linked accounts |
 | **Credits** | About |
 
