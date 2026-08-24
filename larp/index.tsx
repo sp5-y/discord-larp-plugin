@@ -80,8 +80,15 @@ interface ShopNameplate {
     palette?: string;
 }
 
+let cachedOwnUserId = "";
+let cachedCustomJoinDate: Date | null = null;
+let cachedCustomJoinDateMs: number | null = null;
+let cachedCustomJoinDateKey = "";
+
 function getCurrentUserId() {
-    return AuthenticationStore.getId();
+    const id = AuthenticationStore.getId() ?? "";
+    cachedOwnUserId = id;
+    return id;
 }
 
 function connKey(c: ConnectedAccount) {
@@ -2332,6 +2339,10 @@ function wrapDisplayProfile<T extends { userId: string; getBadges(): unknown[]; 
                 const custom = getCustomJoinDate();
                 if (custom) return custom;
             }
+            if (prop === "getCreatedAt") {
+                const custom = getCustomJoinDate();
+                if (custom) return () => custom;
+            }
             if (prop === "__larpToolWrapped") return true;
             return Reflect.get(target, prop, receiver);
         },
@@ -2348,30 +2359,95 @@ function getCustomName() {
     return n || null;
 }
 
-function getCustomJoinDate(): Date | null {
-    if (!settings.store.enabled) return null;
-    const raw = settings.store.customJoinDate?.trim();
-    if (!raw) return null;
-    const match = raw.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+function parseJoinDate(raw: string): Date | null {
+    const match = raw.trim().match(/^(\d{4})-(\d{2})-(\d{2})$/);
     if (!match) return null;
-    const date = new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3]), 12, 0, 0));
-    return Number.isNaN(date.getTime()) ? null : date;
+    const year = Number(match[1]);
+    const month = Number(match[2]);
+    const day = Number(match[3]);
+    if (month < 1 || month > 12 || day < 1 || day > 31) return null;
+    const date = new Date(Date.UTC(year, month - 1, day, 12, 0, 0));
+    if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month - 1 || date.getUTCDate() !== day) return null;
+    return date;
+}
+
+function refreshCustomJoinDateCache() {
+    const raw = settings.store.enabled ? (settings.store.customJoinDate?.trim() ?? "") : "";
+    const key = raw;
+    if (key === cachedCustomJoinDateKey) return;
+    cachedCustomJoinDateKey = key;
+    const date = raw ? parseJoinDate(raw) : null;
+    cachedCustomJoinDate = date;
+    cachedCustomJoinDateMs = date ? date.getTime() : null;
+}
+
+function getCustomJoinDate(): Date | null {
+    refreshCustomJoinDateCache();
+    return cachedCustomJoinDate;
 }
 
 function getCustomJoinDateMs(): number | null {
-    const date = getCustomJoinDate();
-    return date ? date.getTime() : null;
+    refreshCustomJoinDateCache();
+    return cachedCustomJoinDateMs;
+}
+
+function formatJoinDateInput(raw: string): string {
+    const digits = raw.replace(/\D/g, "").slice(0, 8);
+    if (!digits.length) return "";
+    if (digits.length <= 4) return digits;
+    if (digits.length <= 6) return `${digits.slice(0, 4)}-${digits.slice(4)}`;
+    return `${digits.slice(0, 4)}-${digits.slice(4, 6)}-${digits.slice(6)}`;
+}
+
+function isCompleteJoinDate(value: string) {
+    return /^\d{4}-\d{2}-\d{2}$/.test(value.trim());
+}
+
+function JoinDateInput({ value, onChange }: { value: string; onChange: (v: string) => void }) {
+    const [draft, setDraft] = useState(() => formatJoinDateInput(value));
+
+    useEffect(() => {
+        setDraft(formatJoinDateInput(value));
+    }, [value]);
+
+    const formatted = formatJoinDateInput(draft);
+    const complete = isCompleteJoinDate(formatted);
+    const valid = !complete || parseJoinDate(formatted) != null;
+
+    const handleChange = (v: string) => {
+        const next = formatJoinDateInput(v);
+        setDraft(next);
+        if (!next || isCompleteJoinDate(next)) onChange(next);
+    };
+
+    return (
+        <>
+            <TextInput
+                value={formatted}
+                onChange={handleChange}
+                placeholder="YYYY-MM-DD"
+                maxLength={10}
+            />
+            {complete && !valid && (
+                <Forms.FormText style={{ margin: "8px 0 0", color: "var(--text-danger)", fontSize: 12 }}>
+                    that date isn't valid
+                </Forms.FormText>
+            )}
+        </>
+    );
 }
 
 function withLarpUser(user: User | null | undefined): User | null | undefined {
     if (!user?.id || user.id !== getCurrentUserId() || !settings.store.enabled) return user;
 
     const custom = getCustomName();
+    const joinDate = getCustomJoinDate();
     const deco = getLarpAvatarDecoration();
     const plate = getLarpNameplate();
     const hasLarpNameplate = !!plate?.skuId;
     const canSpoofNameplate = canSpoofLarpNameplate(plate);
     const needsUsername = !!custom && user.username !== custom;
+    const needsJoinDate = !!joinDate;
     const needsDeco = !!deco && user.avatarDecorationData?.skuId !== deco.skuId;
     const realPlate = user.nameplate;
     const needsNameplate = hasLarpNameplate && (
@@ -2380,9 +2456,9 @@ function withLarpUser(user: User | null | undefined): User | null | undefined {
             : !!realPlate
     );
 
-    if (!needsUsername && !needsDeco && !needsNameplate) return user;
+    if (!needsUsername && !needsJoinDate && !needsDeco && !needsNameplate) return user;
 
-    const cacheKey = `${userProxyGeneration}:${custom ?? ""}:${deco?.skuId ?? ""}:${hasLarpNameplate ? `${plate!.skuId}:${plate!.asset}:${canSpoofNameplate}` : ""}`;
+    const cacheKey = `${userProxyGeneration}:${custom ?? ""}:${settings.store.customJoinDate?.trim() ?? ""}:${deco?.skuId ?? ""}:${hasLarpNameplate ? `${plate!.skuId}:${plate!.asset}:${canSpoofNameplate}` : ""}`;
     const cached = usernameProxyCache.get(user);
     if (cached?.__larpKey === cacheKey) return cached;
 
@@ -2413,10 +2489,8 @@ function withLarpUser(user: User | null | undefined): User | null | undefined {
                     return stripRealNameplateCollectibles();
                 }
             }
-            if (prop === "createdAt") {
-                const custom = getCustomJoinDate();
-                if (custom) return custom;
-            }
+            if (prop === "createdAt" && joinDate) return joinDate;
+            if (prop === "getCreatedAt" && joinDate) return () => joinDate;
             return Reflect.get(target, prop, receiver);
         },
     }) as User & { __larpKey?: string; };
@@ -2487,13 +2561,26 @@ function pickLarpNameplateUserValue(
     return value !== undefined ? value : fallback;
 }
 
+function resolveSnowflakeUserId(id: string | { id?: string; toString?: () => string; } | null | undefined) {
+    if (typeof id === "string") return id;
+    if (id && typeof id === "object") {
+        if (typeof id.id === "string") return id.id;
+        if (typeof id.toString === "function") return id.toString();
+    }
+    return "";
+}
+
 function getLarpCreatedAt(userId: string | null | undefined, fallback: number | Date | null | undefined) {
-    if (userId && userId === getCurrentUserId()) {
-        const ms = getCustomJoinDateMs();
-        if (ms != null) return ms;
+    if (userId && cachedCustomJoinDateMs != null && userId === cachedOwnUserId) {
+        return cachedCustomJoinDateMs;
     }
     if (fallback instanceof Date) return fallback.getTime();
-    return typeof fallback === "number" ? fallback : fallback ?? 0;
+    if (typeof fallback === "number") return fallback;
+    if (typeof fallback === "string") {
+        const parsed = Date.parse(fallback);
+        if (!Number.isNaN(parsed)) return parsed;
+    }
+    return fallback ?? 0;
 }
 
 function getAccountSettingsUsername(user: User) {
@@ -2601,6 +2688,9 @@ function wrapMessageForDisplay(message: Message | null | undefined): Message | n
 
 function invalidateRuntimeCaches() {
     invalidateHiddenBadgeCache();
+    cachedOwnUserId = AuthenticationStore.getId() ?? "";
+    cachedCustomJoinDateKey = "";
+    refreshCustomJoinDateCache();
     profileWrapGeneration++;
     messageCollectionGeneration++;
     userProxyGeneration++;
@@ -2763,33 +2853,19 @@ function setAddedBadgeVisible(id: string, visible: boolean) {
     triggerProfileRefresh();
 }
 
+function needsProfileRefreshOnLoad() {
+    return !!(
+        settings.store.customJoinDate?.trim()
+        || settings.store.larpNameplate
+        || settings.store.larpAvatarDecoration
+        || settings.store.larpProfileEffect
+    );
+}
+
 function buildUserUpdatePayload() {
     const user = origGetCurrentUser?.();
     if (!user) return null;
-
-    const payload = typeof user.toJS === "function"
-        ? user.toJS() as Record<string, unknown>
-        : { ...user };
-
-    const custom = getCustomName();
-    if (custom) payload.username = custom;
-
-    const deco = getLarpAvatarDecoration();
-    if (deco) payload.avatarDecorationData = deco;
-
-    const plate = getLarpNameplate();
-    if (plate) {
-        if (canSpoofLarpNameplate(plate)) {
-            const nameplate = buildLarpNameplateCollectible(plate);
-            payload.nameplate = { asset: nameplate.asset, skuId: nameplate.skuId };
-            payload.collectibles = buildLarpCollectibles(plate);
-        } else {
-            payload.nameplate = null;
-            payload.collectibles = stripRealNameplateCollectibles();
-        }
-    }
-
-    return payload;
+    return withLarpUser(user) ?? user;
 }
 
 function triggerProfileRefresh(debounceMs = 100) {
@@ -4535,15 +4611,13 @@ const BadgeModal = ErrorBoundary.wrap(function BadgeModal(props: RenderModalProp
                             {tab === ModalTabs.Decorations && <DecorationsSection />}
 
                             {tab === ModalTabs.MemberSince && (
-                                <FieldCard label="Member since" hint="Overrides the date shown on your profile. Use YYYY-MM-DD.">
-                                    <TextInput
+                                <FieldCard label="Member since" hint="Overrides the date on your profile.">
+                                    <JoinDateInput
                                         value={settings.store.customJoinDate}
                                         onChange={v => {
                                             settings.store.customJoinDate = v;
                                             triggerProfileRefresh(200);
                                         }}
-                                        placeholder="YYYY-MM-DD"
-                                        maxLength={10}
                                     />
                                 </FieldCard>
                             )}
@@ -4647,8 +4721,10 @@ function wrapOwnUserProfile(profile: NonNullable<ReturnType<typeof UserProfileSt
                 ?? (larpEffect as { skuId?: string; }).skuId,
             profileEffectExpiresAt: null,
         } : {}),
-        ...(joinDate ? { createdAt: joinDate } : {}),
+        ...(joinDate ? { createdAt: joinDate.toISOString() } : {}),
     });
+
+    if (joinDate) wrapped.getCreatedAt = () => joinDate;
 
     wrappedProfileCache.set(profile, { gen: profileWrapGeneration, value: wrapped });
     return wrapped;
@@ -4823,6 +4899,51 @@ function patchMessageStore() {
     unpatchFns.push(() => {
         MessageStore.getMessage = origGetMessage;
         MessageStore.getMessages = origGetMessages;
+    });
+}
+
+function patchUserCreatedAt() {
+    waitFor(
+        m => typeof m === "function"
+            && typeof m.prototype?.getCreatedAt === "function"
+            && typeof m.prototype?.getAvatarURL === "function"
+            && !(m.prototype as { __larpCreatedAtPatched?: boolean; }).__larpCreatedAtPatched,
+        (UserModel: { prototype: { getCreatedAt: () => unknown; __larpCreatedAtPatched?: boolean; }; }) => {
+            if (UserModel.prototype.__larpCreatedAtPatched) return;
+            const original = UserModel.prototype.getCreatedAt;
+            UserModel.prototype.getCreatedAt = function (this: { id: string; }) {
+                if (settings.store.enabled && this.id === getCurrentUserId()) {
+                    const ms = getCustomJoinDateMs();
+                    if (ms != null) return new Date(ms);
+                }
+                return original.call(this);
+            };
+            UserModel.prototype.__larpCreatedAtPatched = true;
+            unpatchFns.push(() => {
+                UserModel.prototype.getCreatedAt = original;
+                delete UserModel.prototype.__larpCreatedAtPatched;
+            });
+        },
+    );
+}
+
+function patchSnowflakeExtractTimestamp() {
+    waitFor(filters.byProps("extractTimestamp", "fromTimestamp"), (utils: {
+        extractTimestamp: (id: unknown) => number;
+        __larpExtractTsPatched?: boolean;
+    }) => {
+        if (utils.__larpExtractTsPatched) return;
+        const original = utils.extractTimestamp.bind(utils);
+        utils.extractTimestamp = (id: unknown) => {
+            const ms = cachedCustomJoinDateMs;
+            if (ms != null && id === cachedOwnUserId) return ms;
+            return original(id);
+        };
+        utils.__larpExtractTsPatched = true;
+        unpatchFns.push(() => {
+            utils.extractTimestamp = original;
+            delete utils.__larpExtractTsPatched;
+        });
     });
 }
 
@@ -5039,15 +5160,8 @@ export default definePlugin({
         {
             find: "#{intl::USER_PROFILE_MEMBER_SINCE}",
             replacement: {
-                match: /(\i)\.getCreatedAt\(\)/,
-                replace: "($self.getLarpCreatedAt($1.id,$1.getCreatedAt?.()??$1.createdAt))"
-            }
-        },
-        {
-            find: "#{intl::USER_PROFILE_MEMBER_SINCE}",
-            replacement: {
                 match: /extractTimestamp\((\i)(?:\.id)?\)/,
-                replace: "$self.getLarpCreatedAt(typeof $1===\"string\"?$1:$1?.id,extractTimestamp($1))"
+                replace: "$self.getLarpCreatedAt($self.resolveSnowflakeUserId($1),extractTimestamp($1))"
             }
         },
     ],
@@ -5070,6 +5184,7 @@ export default definePlugin({
     getLarpNameplate,
     getLarpNameplateProduct,
     getLarpCreatedAt,
+    resolveSnowflakeUserId,
     filterBadges,
     mergeLarpDisplayBadges,
     getCurrentUserId,
@@ -5105,6 +5220,8 @@ export default definePlugin({
     },
 
     start() {
+        getCurrentUserId();
+        refreshCustomJoinDateCache();
         larpNameplateReady = !settings.store.larpNameplate?.skuId || !!settings.store.larpNameplate?.asset;
         larpProfileEffectReady = !settings.store.larpProfileEffect?.skuId;
 
@@ -5160,6 +5277,8 @@ export default definePlugin({
 
         document.addEventListener("keydown", handleKeyDown, true);
         try { patchUserStore(); } catch (e) { console.warn("larp: user store patch", e); }
+        try { patchUserCreatedAt(); } catch (e) { console.warn("larp: user createdAt patch", e); }
+        try { patchSnowflakeExtractTimestamp(); } catch (e) { console.warn("larp: snowflake extractTimestamp patch", e); }
         try { patchMessageStore(); } catch (e) { console.warn("larp: message store patch", e); }
         try { patchParser(); } catch (e) { console.warn("larp: parser patch", e); }
         refreshCachedUsername();
@@ -5175,7 +5294,7 @@ export default definePlugin({
 
         const onConnectionOpen = () => {
             void hydrateLarpProductsFromApi().then(() => {
-                if (settings.store.larpNameplate || settings.store.larpAvatarDecoration || settings.store.larpProfileEffect) {
+                if (needsProfileRefreshOnLoad()) {
                     triggerProfileRefresh();
                 }
             });
@@ -5186,7 +5305,7 @@ export default definePlugin({
         updateHiddenBadgeStyles();
 
         void hydrateLarpProductsFromApi().then(() => {
-            if (settings.store.larpNameplate || settings.store.larpAvatarDecoration || settings.store.larpProfileEffect) {
+            if (needsProfileRefreshOnLoad()) {
                 triggerProfileRefresh();
             }
         });
