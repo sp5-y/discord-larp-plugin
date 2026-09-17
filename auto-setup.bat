@@ -6,12 +6,14 @@ setlocal EnableExtensions EnableDelayedExpansion
 ::   auto-setup.bat              clone, plugin, build, patch Discord
 ::   auto-setup.bat rebuild      copy plugin + rebuild only
 ::   auto-setup.bat inject       rebuild + patch Discord
+::   auto-setup.bat patch        patch Discord only (no rebuild)
 ::
-::   VENCORD_DIR, DISCORD_BRANCH=auto|stable|ptb|canary, DISCORD_LOCATION
+::   VENCORD_DIR, DISCORD_BRANCH=stable|ptb|canary|auto, DISCORD_LOCATION
 ::   NOINJECT=1, KEEP_DISCORD_OPEN=1
 
 set "ROOT=%~dp0"
 set "PLUGIN_SRC=%ROOT%larp\index.tsx"
+set "PATCH_SCRIPT=%ROOT%patch-discord.mjs"
 set "PLUGIN_NAME=larp"
 set "VENCORD_REPO=https://github.com/Vendicated/Vencord"
 set "EXITCODE=0"
@@ -20,7 +22,7 @@ if not defined VENCORD_DIR set "VENCORD_DIR=%LOCALAPPDATA%\Vencord-custom"
 set "USERPLUGIN_DIR=%VENCORD_DIR%\src\userplugins\%PLUGIN_NAME%"
 set "MODE=%~1"
 if not defined MODE set "MODE=setup"
-if not defined DISCORD_BRANCH set "DISCORD_BRANCH=auto"
+if not defined DISCORD_BRANCH set "DISCORD_BRANCH=stable"
 
 title Larp Tool - Vencord Setup
 goto :main
@@ -35,16 +37,20 @@ echo.
 if /I "%MODE%"=="rebuild" (
     echo   Rebuild only - Discord was NOT patched.
     echo   Run: auto-setup.bat inject
+) else if /I "%MODE%"=="patch" (
+    echo   Discord patched. Fully quit Discord ^(tray too^), then reopen.
 ) else if defined NOINJECT (
     echo   Build only ^(NOINJECT=1^). Run: auto-setup.bat inject
 ) else (
     echo   Next steps:
-    echo     1. Restart Discord completely
-    echo     2. Vencord Settings ^> Plugins ^> enable "Larp Tool"
-    echo     3. Ctrl+B to open
+    echo     1. Fully quit Discord ^(system tray too^), then reopen
+    echo     2. Settings should show a Vencord section
+    echo     3. Vencord Settings ^> Plugins ^> enable "Larp Tool"
+    echo     4. Ctrl+B to open
 )
 echo.
-echo   After editing larp\index.tsx:  auto-setup.bat rebuild
+echo   After editing larp\index.tsx:  auto-setup.bat inject
+echo   After Discord updates itself:  auto-setup.bat patch
 echo.
 pause
 exit /b %EXITCODE%
@@ -76,13 +82,31 @@ if not exist "%PLUGIN_SRC%" (
     echo [ERROR] Plugin not found: %PLUGIN_SRC%
     goto :failed
 )
+if not exist "%PATCH_SCRIPT%" (
+    echo [ERROR] Patch script not found: %PATCH_SCRIPT%
+    goto :failed
+)
 
 call :require_cmd git "https://git-scm.com/download/win" || goto :failed
 call :require_cmd node "https://nodejs.org/" || goto :failed
+
+if /I "%MODE%"=="patch" (
+    call :patch_discord || goto :failed
+    goto :finish
+)
+
 call :ensure_pnpm || goto :failed
 
 if /I not "%MODE%"=="rebuild" if /I not "%MODE%"=="inject" (
     call :clone_or_update_vencord || goto :failed
+)
+
+if /I "%MODE%"=="inject" (
+    if not exist "%VENCORD_DIR%\src" (
+        echo [ERROR] Vencord not found at %VENCORD_DIR%
+        echo         Run auto-setup.bat once with no args first.
+        goto :failed
+    )
 )
 
 call :install_plugin || goto :failed
@@ -102,10 +126,11 @@ echo Usage:
 echo   auto-setup.bat              Clone Vencord, install plugin, build, patch Discord
 echo   auto-setup.bat rebuild      Copy larp\index.tsx and rebuild (no patch)
 echo   auto-setup.bat inject       Rebuild and patch Discord
+echo   auto-setup.bat patch        Patch Discord only (after Discord updates)
 echo.
 echo Environment:
 echo   VENCORD_DIR         Vencord folder (default: %%LOCALAPPDATA%%\Vencord-custom)
-echo   DISCORD_BRANCH      auto ^| stable ^| ptb ^| canary
+echo   DISCORD_BRANCH      stable ^| ptb ^| canary ^| auto  (default: stable)
 echo   DISCORD_LOCATION    Custom Discord install path
 echo   NOINJECT=1          Skip patching Discord
 echo.
@@ -226,37 +251,28 @@ if not "!ERR!"=="0" (
     echo [ERROR] pnpm build failed
     exit /b 1
 )
+if not exist "%VENCORD_DIR%\dist\patcher.js" (
+    echo [ERROR] build finished but dist\patcher.js is missing
+    exit /b 1
+)
 echo [OK] %VENCORD_DIR%\dist
 exit /b 0
 
 :patch_discord
-echo [..] patching Discord (non-interactive)...
-if not defined KEEP_DISCORD_OPEN (
-    echo      closing Discord...
-    taskkill /IM Discord.exe /F >nul 2>&1
-    taskkill /IM DiscordCanary.exe /F >nul 2>&1
-    taskkill /IM DiscordPTB.exe /F >nul 2>&1
-    ping -n 3 127.0.0.1 >nul
-)
-pushd "%VENCORD_DIR%"
+echo [..] patching Discord (direct, verified)...
+:: IMPORTANT: do NOT use VencordInstallerCli with VENCORD_DEV_INSTALL=1.
+:: That path reports Success without renaming app.asar, which leaves Discord
+:: unpatched (or unpatches it if we uninstall first).
 if defined DISCORD_LOCATION (
-    echo      target: %DISCORD_LOCATION%
-    echo [..] trying uninstall first ^(safe to ignore rename errors^)...
-    call node scripts/runInstaller.mjs -- --uninstall --location "%DISCORD_LOCATION%" >nul 2>&1
-    echo [..] installing custom build...
-    call node scripts/runInstaller.mjs -- --install --location "%DISCORD_LOCATION%"
+    call node "%PATCH_SCRIPT%" --vencord "%VENCORD_DIR%" --discord "%DISCORD_LOCATION%" --branch %DISCORD_BRANCH%
 ) else (
-    echo      branch: %DISCORD_BRANCH%
-    echo [..] trying uninstall first ^(safe to ignore rename errors^)...
-    call node scripts/runInstaller.mjs -- --uninstall --branch %DISCORD_BRANCH% >nul 2>&1
-    echo [..] installing custom build...
-    call node scripts/runInstaller.mjs -- --install --branch %DISCORD_BRANCH%
+    call node "%PATCH_SCRIPT%" --vencord "%VENCORD_DIR%" --branch %DISCORD_BRANCH%
 )
 set "ERR=!ERRORLEVEL!"
-popd
 if not "!ERR!"=="0" (
-    echo [ERROR] patch failed - try: set DISCORD_BRANCH=stable
+    echo [ERROR] patch failed
+    echo         Make sure Discord is fully closed, then try: auto-setup.bat patch
+    echo         Or set DISCORD_LOCATION to your Discord folder.
     exit /b 1
 )
-echo [OK] Discord patched with your custom build
 exit /b 0

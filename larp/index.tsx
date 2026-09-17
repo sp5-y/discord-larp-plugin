@@ -307,6 +307,21 @@ const settings = definePluginSettings({
         type: OptionType.CUSTOM,
         default: null as LarpNameplateSetting | null,
     },
+    hiddenAvatarDecoration: {
+        type: OptionType.BOOLEAN,
+        description: "Hide your real avatar decoration (local only).",
+        default: false,
+    },
+    hiddenProfileEffect: {
+        type: OptionType.BOOLEAN,
+        description: "Hide your real profile effect (local only).",
+        default: false,
+    },
+    hiddenNameplate: {
+        type: OptionType.BOOLEAN,
+        description: "Hide your real nameplate (local only).",
+        default: false,
+    },
     customJoinDate: {
         type: OptionType.STRING,
         description: "Fake Member Since date (YYYY-MM-DD). Leave empty for real.",
@@ -521,6 +536,9 @@ interface LarpExportData {
     larpAvatarDecoration?: LarpAvatarDecorationSetting | null;
     larpProfileEffect?: LarpProfileEffectSetting | null;
     larpNameplate?: LarpNameplateSetting | null;
+    hiddenAvatarDecoration?: boolean;
+    hiddenProfileEffect?: boolean;
+    hiddenNameplate?: boolean;
 }
 
 const cardStyle = {
@@ -615,6 +633,9 @@ function applyLarpExportData(data: LarpExportData) {
             previewUrl: typeof data.larpNameplate.previewUrl === "string" ? data.larpNameplate.previewUrl : undefined,
         }
         : null;
+    settings.store.hiddenAvatarDecoration = !!data.hiddenAvatarDecoration;
+    settings.store.hiddenProfileEffect = !!data.hiddenProfileEffect;
+    settings.store.hiddenNameplate = !!data.hiddenNameplate;
     larpNameplateReady = !settings.store.larpNameplate?.skuId || !!settings.store.larpNameplate?.asset;
     larpProfileEffectReady = !settings.store.larpProfileEffect?.skuId;
     ensureLarpDecorationProductsFromSettings();
@@ -634,6 +655,9 @@ function resetLarpConfig() {
         larpAvatarDecoration: null,
         larpProfileEffect: null,
         larpNameplate: null,
+        hiddenAvatarDecoration: false,
+        hiddenProfileEffect: false,
+        hiddenNameplate: false,
     });
 }
 
@@ -1033,6 +1057,8 @@ function applyLarpNameplateOverride(
     normalizeNameplate: (value: unknown) => unknown,
 ) {
     if (!user?.id || user.id !== getCurrentUserId() || !settings.store.enabled) return undefined;
+
+    if (isNameplateHidden()) return null;
 
     const plate = getLarpNameplate();
     if (!plate) return undefined;
@@ -1587,15 +1613,97 @@ async function searchShopDecorations(
     return dedupeShopNameplate(nameplate);
 }
 
+function getRealAvatarDecoration(): { skuId: string; asset: string; label?: string; previewUrl?: string; } | null {
+    const user = origGetCurrentUser?.();
+    const deco = (user as { avatarDecorationData?: { skuId?: string; asset?: string; }; avatarDecoration?: { skuId?: string; asset?: string; }; } | null | undefined)
+        ?.avatarDecorationData
+        ?? (user as { avatarDecoration?: { skuId?: string; asset?: string; }; } | null | undefined)?.avatarDecoration;
+    if (!deco?.skuId || !deco.asset) return null;
+    return {
+        skuId: String(deco.skuId),
+        asset: String(deco.asset),
+        previewUrl: resolveAvatarDecorationPreviewUrl(String(deco.skuId), String(deco.asset)),
+    };
+}
+
+function getRealNameplate(): LarpNameplateSetting | null {
+    const user = origGetCurrentUser?.();
+    const plate = (user as { nameplate?: { skuId?: string; asset?: string; label?: string; palette?: string; }; } | null | undefined)?.nameplate
+        ?? getRealUserCollectiblesNameplate();
+    if (!plate?.skuId || !plate.asset) return null;
+    return {
+        skuId: String(plate.skuId),
+        asset: String(plate.asset),
+        label: typeof plate.label === "string" ? plate.label : undefined,
+        palette: typeof plate.palette === "string" ? plate.palette : undefined,
+        previewUrl: resolveNameplatePreviewUrl(String(plate.asset)),
+    };
+}
+
+function getRealProfileEffect(): LarpProfileEffectSetting | null {
+    const userId = getCurrentUserId();
+    if (!userId) return null;
+    const profile = origGetUserProfile?.(userId);
+    const effect = (profile as { profileEffect?: LarpProfileEffectSetting | null; } | null | undefined)?.profileEffect;
+    if (!effect) return null;
+    const skuId = (effect as { skuId?: string; id?: string; }).skuId
+        ?? (effect as { id?: string; }).id;
+    if (!skuId) return null;
+    return {
+        ...effect,
+        skuId: String(skuId),
+        id: (effect as { id?: string; }).id ?? String(skuId),
+        title: (effect as { title?: string; }).title ?? "Profile effect",
+    };
+}
+
+function isAvatarDecorationHidden() {
+    return !!settings.store.hiddenAvatarDecoration;
+}
+
+function isProfileEffectHidden() {
+    return !!settings.store.hiddenProfileEffect;
+}
+
+function isNameplateHidden() {
+    return !!settings.store.hiddenNameplate;
+}
+
+function setAvatarDecorationHidden(hidden: boolean) {
+    settings.store.hiddenAvatarDecoration = hidden;
+    if (hidden) settings.store.larpAvatarDecoration = null;
+    userProxyGeneration++;
+    triggerProfileRefresh();
+}
+
+function setProfileEffectHidden(hidden: boolean) {
+    settings.store.hiddenProfileEffect = hidden;
+    if (hidden) {
+        settings.store.larpProfileEffect = null;
+        larpProfileEffectReady = true;
+    }
+    triggerProfileRefresh();
+}
+
+function setNameplateHidden(hidden: boolean) {
+    settings.store.hiddenNameplate = hidden;
+    if (hidden) {
+        settings.store.larpNameplate = null;
+        larpNameplateReady = true;
+    }
+    userProxyGeneration++;
+    triggerProfileRefresh();
+}
+
 function getLarpAvatarDecoration() {
-    if (!settings.store.enabled) return null;
+    if (!settings.store.enabled || isAvatarDecorationHidden()) return null;
     const deco = settings.store.larpAvatarDecoration;
     if (!deco?.skuId || !deco.asset) return null;
     return { asset: deco.asset, skuId: deco.skuId, expires_at: null };
 }
 
 function getLarpProfileEffect() {
-    if (!settings.store.enabled) return null;
+    if (!settings.store.enabled || isProfileEffectHidden()) return null;
     if (!canSpoofLarpProfileEffect()) return null;
 
     const configured = settings.store.larpProfileEffect;
@@ -1663,6 +1771,7 @@ function isLarpOwnedProfileEffect(effect: { skuId?: string; id?: string; } | nul
 }
 
 function equipAvatarDecoration(item: ShopAvatarDeco | null) {
+    settings.store.hiddenAvatarDecoration = false;
     settings.store.larpAvatarDecoration = item
         ? { skuId: item.skuId, asset: item.asset, label: item.label, previewUrl: item.previewUrl }
         : null;
@@ -1674,10 +1783,12 @@ function equipAvatarDecoration(item: ShopAvatarDeco | null) {
             type: 0,
         });
     }
+    userProxyGeneration++;
     triggerProfileRefresh();
 }
 
 function equipProfileEffect(item: ShopProfileEffect | null) {
+    settings.store.hiddenProfileEffect = false;
     if (!item) {
         settings.store.larpProfileEffect = null;
         larpProfileEffectReady = true;
@@ -1751,7 +1862,7 @@ function canSpoofLarpNameplate(plate: LarpNameplateSetting | null) {
 }
 
 function getLarpNameplate() {
-    if (!settings.store.enabled) return null;
+    if (!settings.store.enabled || isNameplateHidden()) return null;
     const plate = settings.store.larpNameplate;
     if (!plate?.skuId || !plate.asset) return null;
     return plate;
@@ -1770,6 +1881,7 @@ function isLarpOwnedNameplate(plate: { skuId?: string; } | null | undefined) {
 }
 
 function equipNameplate(item: ShopNameplate | null) {
+    settings.store.hiddenNameplate = false;
     settings.store.larpNameplate = item
         ? {
             skuId: item.skuId,
@@ -2325,11 +2437,13 @@ function wrapDisplayProfile<T extends { userId: string; getBadges(): unknown[]; 
                 }>);
             }
             if (prop === "profileEffect") {
+                if (isProfileEffectHidden()) return null;
                 if (canSpoofLarpProfileEffect()) {
                     return getLarpProfileEffect();
                 }
             }
             if (prop === "profileEffectId") {
+                if (isProfileEffectHidden()) return null;
                 if (canSpoofLarpProfileEffect()) {
                     const larp = getLarpProfileEffect();
                     if (larp) return (larp as { id?: string; skuId?: string; }).id ?? (larp as { skuId?: string; }).skuId;
@@ -2442,23 +2556,30 @@ function withLarpUser(user: User | null | undefined): User | null | undefined {
 
     const custom = getCustomName();
     const joinDate = getCustomJoinDate();
-    const deco = getLarpAvatarDecoration();
-    const plate = getLarpNameplate();
+    const hideDeco = isAvatarDecorationHidden();
+    const hidePlate = isNameplateHidden();
+    const deco = hideDeco ? null : getLarpAvatarDecoration();
+    const plate = hidePlate ? null : getLarpNameplate();
     const hasLarpNameplate = !!plate?.skuId;
     const canSpoofNameplate = canSpoofLarpNameplate(plate);
     const needsUsername = !!custom && user.username !== custom;
     const needsJoinDate = !!joinDate;
-    const needsDeco = !!deco && user.avatarDecorationData?.skuId !== deco.skuId;
+    const realDecoSku = user.avatarDecorationData?.skuId;
+    const needsDeco = hideDeco
+        ? !!realDecoSku
+        : (!!deco && realDecoSku !== deco.skuId);
     const realPlate = user.nameplate;
-    const needsNameplate = hasLarpNameplate && (
-        canSpoofNameplate
-            ? (!realPlate || realPlate.skuId !== plate!.skuId || realPlate.asset !== plate!.asset)
-            : !!realPlate
-    );
+    const needsNameplate = hidePlate
+        ? !!realPlate
+        : (hasLarpNameplate && (
+            canSpoofNameplate
+                ? (!realPlate || realPlate.skuId !== plate!.skuId || realPlate.asset !== plate!.asset)
+                : !!realPlate
+        ));
 
     if (!needsUsername && !needsJoinDate && !needsDeco && !needsNameplate) return user;
 
-    const cacheKey = `${userProxyGeneration}:${custom ?? ""}:${settings.store.customJoinDate?.trim() ?? ""}:${deco?.skuId ?? ""}:${hasLarpNameplate ? `${plate!.skuId}:${plate!.asset}:${canSpoofNameplate}` : ""}`;
+    const cacheKey = `${userProxyGeneration}:${custom ?? ""}:${settings.store.customJoinDate?.trim() ?? ""}:${hideDeco ? "hide-deco" : (deco?.skuId ?? "")}:${hidePlate ? "hide-plate" : (hasLarpNameplate ? `${plate!.skuId}:${plate!.asset}:${canSpoofNameplate}` : "")}`;
     const cached = usernameProxyCache.get(user);
     if (cached?.__larpKey === cacheKey) return cached;
 
@@ -2468,9 +2589,11 @@ function withLarpUser(user: User | null | undefined): User | null | undefined {
         get(target, prop, receiver) {
             if (prop === "username" && custom) return custom;
             if (prop === "avatarDecorationData" || prop === "avatarDecoration") {
+                if (hideDeco) return null;
                 if (deco) return deco;
             }
             if (prop === "nameplate") {
+                if (hidePlate) return null;
                 if (hasLarpNameplate) {
                     if (nameplateCollectible) {
                         return {
@@ -2484,6 +2607,7 @@ function withLarpUser(user: User | null | undefined): User | null | undefined {
                 }
             }
             if (prop === "collectibles") {
+                if (hidePlate) return stripRealNameplateCollectibles();
                 if (hasLarpNameplate) {
                     if (canSpoofNameplate && plate) return buildLarpCollectibles(plate);
                     return stripRealNameplateCollectibles();
@@ -2519,6 +2643,8 @@ function resolveRenderedProfileEffect(
         return readProfileEffect();
     }
 
+    if (isProfileEffectHidden()) return null;
+
     if (canSpoofLarpProfileEffect()) {
         return getLarpProfileEffect();
     }
@@ -2526,21 +2652,38 @@ function resolveRenderedProfileEffect(
     return readProfileEffect();
 }
 
+const LARP_AVATAR_REMOVED = { __larpRemoved: true as const };
+
 function useLarpAvatarDecoration(user: User | null | undefined) {
-    settings.use(["larpAvatarDecoration", "enabled"]);
-    if (!user?.id || user.id !== getCurrentUserId()) return null;
-    return getLarpAvatarDecoration();
+    settings.use(["larpAvatarDecoration", "hiddenAvatarDecoration", "enabled"]);
+    if (!user?.id || user.id !== getCurrentUserId() || !settings.store.enabled) return undefined;
+    if (isAvatarDecorationHidden()) return LARP_AVATAR_REMOVED;
+    return getLarpAvatarDecoration() ?? undefined;
+}
+
+function resolveLarpAvatarDecorationValue(
+    larp: ReturnType<typeof useLarpAvatarDecoration>,
+    fallback: unknown,
+) {
+    if (larp && typeof larp === "object" && "__larpRemoved" in larp) return null;
+    return larp !== undefined ? larp : fallback;
+}
+
+function pickLarpAvatarDecoration(user: User | null | undefined, fallback: unknown) {
+    return resolveLarpAvatarDecorationValue(useLarpAvatarDecoration(user), fallback);
 }
 
 function useLarpProfileEffect(userId: string | null | undefined) {
-    settings.use(["larpProfileEffect", "enabled"]);
+    settings.use(["larpProfileEffect", "hiddenProfileEffect", "enabled"]);
     if (!userId || userId !== getCurrentUserId()) return null;
+    if (isProfileEffectHidden()) return null;
     return getLarpProfileEffect();
 }
 
 function useLarpNameplate(user: User | null | undefined) {
-    settings.use(["larpNameplate", "enabled"]);
+    settings.use(["larpNameplate", "hiddenNameplate", "enabled"]);
     if (!user?.id || user.id !== getCurrentUserId()) return undefined;
+    if (isNameplateHidden()) return null;
     const plate = getLarpNameplate();
     if (!plate) return undefined;
     if (!canSpoofLarpNameplate(plate)) return null;
@@ -3172,10 +3315,33 @@ function BadgeRow({ badge, active, locked, muted, onClick }: {
 }
 
 function ProfilePreview({ asTitle }: { asTitle?: boolean }) {
-    settings.use(["customUsername", "hiddenBadges", "addedBadges", "larpAvatarDecoration", "larpNameplate"]);
+    settings.use([
+        "customUsername",
+        "hiddenBadges",
+        "addedBadges",
+        "larpAvatarDecoration",
+        "larpNameplate",
+        "hiddenAvatarDecoration",
+        "hiddenNameplate",
+    ]);
     const user = UserStore.getCurrentUser();
-    const avatarDecoPreview = settings.store.larpAvatarDecoration?.previewUrl;
-    const nameplate = settings.store.larpNameplate;
+    const realDeco = useStateFromStores([UserStore], () => getRealAvatarDecoration());
+    const realPlate = useStateFromStores([UserStore], () => getRealNameplate());
+
+    const spoofDeco = settings.store.larpAvatarDecoration;
+    const hideDeco = isAvatarDecorationHidden();
+    const avatarDecoPreview = hideDeco
+        ? null
+        : (spoofDeco?.previewUrl
+            ?? (spoofDeco?.skuId && spoofDeco.asset
+                ? resolveAvatarDecorationPreviewUrl(spoofDeco.skuId, spoofDeco.asset)
+                : null)
+            ?? realDeco?.previewUrl
+            ?? null);
+
+    const spoofPlate = settings.store.larpNameplate;
+    const hidePlate = isNameplateHidden();
+    const nameplate = hidePlate ? null : (spoofPlate ?? realPlate);
     const nameplatePreview = nameplate?.asset
         ? resolveNameplatePreviewUrl(nameplate.asset)
         : (nameplate?.previewUrl ?? null);
@@ -3562,13 +3728,27 @@ function ConnectionTypePicker({ options, value, onChange, placeholder }: {
                 {selected ? (
                     <ConnectionPlatformIcon type={selected.value} size={22} />
                 ) : (
-                    <div style={{
-                        width: 22,
-                        height: 22,
-                        borderRadius: 6,
-                        background: "var(--background-modifier-hover)",
-                        flexShrink: 0,
-                    }} />
+                    <div
+                        title="Choose platform"
+                        aria-hidden="true"
+                        style={{
+                            width: 22,
+                            height: 22,
+                            borderRadius: 6,
+                            flexShrink: 0,
+                            display: "grid",
+                            placeItems: "center",
+                            background: "var(--background-modifier-hover)",
+                            color: "var(--text-muted)",
+                        }}
+                    >
+                        <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+                            <rect x="1.5" y="1.5" width="5" height="5" rx="1.2" stroke="currentColor" strokeWidth="1.4" />
+                            <rect x="9.5" y="1.5" width="5" height="5" rx="1.2" stroke="currentColor" strokeWidth="1.4" />
+                            <rect x="1.5" y="9.5" width="5" height="5" rx="1.2" stroke="currentColor" strokeWidth="1.4" />
+                            <path d="M12 9.5v5M9.5 12h5" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+                        </svg>
+                    </div>
                 )}
                 <Text
                     variant="text-sm/medium"
@@ -3991,12 +4171,18 @@ function EquippedDecorationCard({
     previewUrl,
     assetHint,
     wide,
+    status = "Equipped",
+    muted,
+    clearLabel = "Unequip",
     onClear,
 }: {
     label: string;
     previewUrl?: string | null;
     assetHint?: string;
     wide?: boolean;
+    status?: string;
+    muted?: boolean;
+    clearLabel?: string;
     onClear: () => void;
 }) {
     return (
@@ -4009,6 +4195,7 @@ function EquippedDecorationCard({
             borderRadius: 12,
             background: "transparent",
             boxShadow: "0 1px 0 rgba(0,0,0,0.18), 0 4px 14px rgba(0,0,0,0.12)",
+            opacity: muted ? 0.55 : 1,
         }}>
             <div style={{
                 width: wide ? 96 : 52,
@@ -4044,17 +4231,17 @@ function EquippedDecorationCard({
                     {label}
                 </Text>
                 <Text variant="text-xs/normal" style={{ color: "var(--text-muted)" }}>
-                    Equipped
+                    {status}
                 </Text>
             </div>
             <button
                 type="button"
                 className="vc-larp-icon-btn"
-                title="Unequip"
-                aria-label="Unequip"
+                title={clearLabel}
+                aria-label={clearLabel}
                 onClick={onClear}
             >
-                ×
+                {clearLabel === "Restore" ? "↺" : "×"}
             </button>
         </div>
     );
@@ -4172,7 +4359,18 @@ function DecorationsSection() {
         nameplate: ShopNameplate[];
     }>({ avatar: [], banner: [], nameplate: [] });
 
-    settings.use(["larpAvatarDecoration", "larpProfileEffect", "larpNameplate"]);
+    settings.use([
+        "larpAvatarDecoration",
+        "larpProfileEffect",
+        "larpNameplate",
+        "hiddenAvatarDecoration",
+        "hiddenProfileEffect",
+        "hiddenNameplate",
+    ]);
+
+    const realAvatar = useStateFromStores([UserStore], () => getRealAvatarDecoration());
+    const realBanner = useStateFromStores([UserProfileStore, UserStore], () => getRealProfileEffect());
+    const realNameplate = useStateFromStores([UserStore], () => getRealNameplate());
 
     useEffect(() => {
         let alive = true;
@@ -4263,13 +4461,13 @@ function DecorationsSection() {
     const nameplateCatalog = q ? searchResults.nameplate : shop.nameplate;
     const avatarItems = q
         ? avatarCatalog
-        : getBrowseDecorationItems(shop.avatar, selectedAvatarSku, DECORATION_BROWSE_LIMIT);
+        : getBrowseDecorationItems(shop.avatar, selectedAvatarSku ?? realAvatar?.skuId ?? null, DECORATION_BROWSE_LIMIT);
     const bannerItems = q
         ? bannerCatalog
-        : getBrowseDecorationItems(shop.banner, selectedBannerSku, DECORATION_BROWSE_LIMIT);
+        : getBrowseDecorationItems(shop.banner, selectedBannerSku ?? realBanner?.skuId ?? null, DECORATION_BROWSE_LIMIT);
     const nameplateItems = q
         ? nameplateCatalog
-        : getBrowseDecorationItems(shop.nameplate, selectedNameplateSku, DECORATION_BROWSE_LIMIT);
+        : getBrowseDecorationItems(shop.nameplate, selectedNameplateSku ?? realNameplate?.skuId ?? null, DECORATION_BROWSE_LIMIT);
     const avatarTotal = shop.avatar.length;
     const bannerTotal = shop.banner.length;
     const nameplateTotal = shop.nameplate.length;
@@ -4280,9 +4478,133 @@ function DecorationsSection() {
             ? "Search banner effects..."
             : "Search nameplates...";
 
-    const equippedAvatar = settings.store.larpAvatarDecoration;
-    const equippedBanner = settings.store.larpProfileEffect;
-    const equippedNameplate = settings.store.larpNameplate;
+    const spoofAvatar = settings.store.larpAvatarDecoration;
+    const spoofBanner = settings.store.larpProfileEffect;
+    const spoofNameplate = settings.store.larpNameplate;
+    const hideAvatar = isAvatarDecorationHidden();
+    const hideBanner = isProfileEffectHidden();
+    const hideNameplate = isNameplateHidden();
+
+    const avatarEquippedCard = (() => {
+        if (hideAvatar) {
+            if (!realAvatar) return null;
+            return {
+                label: "Your decoration",
+                previewUrl: realAvatar.previewUrl
+                    ?? resolveAvatarDecorationPreviewUrl(realAvatar.skuId, realAvatar.asset),
+                status: "Hidden",
+                muted: true,
+                clearLabel: "Restore",
+                onClear: () => setAvatarDecorationHidden(false),
+            };
+        }
+        if (spoofAvatar) {
+            return {
+                label: spoofAvatar.label ?? "Avatar decoration",
+                previewUrl: spoofAvatar.previewUrl
+                    ?? resolveAvatarDecorationPreviewUrl(spoofAvatar.skuId, spoofAvatar.asset),
+                status: "Spoofed",
+                clearLabel: "Use real",
+                onClear: () => equipAvatarDecoration(null),
+            };
+        }
+        if (realAvatar) {
+            return {
+                label: "Your decoration",
+                previewUrl: realAvatar.previewUrl
+                    ?? resolveAvatarDecorationPreviewUrl(realAvatar.skuId, realAvatar.asset),
+                status: "Equipped",
+                clearLabel: "Hide",
+                onClear: () => setAvatarDecorationHidden(true),
+            };
+        }
+        return null;
+    })();
+
+    const bannerEquippedCard = (() => {
+        if (hideBanner) {
+            if (!realBanner) return null;
+            return {
+                label: realBanner.title ?? "Profile effect",
+                previewUrl: realBanner.thumbnailPreviewSrc
+                    ?? realBanner.staticFrameSrc
+                    ?? realBanner.reducedMotionSrc
+                    ?? shop.banner.find(i => i.skuId === realBanner.skuId)?.previewUrl
+                    ?? null,
+                status: "Hidden",
+                muted: true,
+                clearLabel: "Restore",
+                onClear: () => setProfileEffectHidden(false),
+            };
+        }
+        if (spoofBanner) {
+            return {
+                label: spoofBanner.title ?? "Profile effect",
+                previewUrl: spoofBanner.thumbnailPreviewSrc
+                    ?? spoofBanner.staticFrameSrc
+                    ?? spoofBanner.reducedMotionSrc
+                    ?? shop.banner.find(i => i.skuId === spoofBanner.skuId)?.previewUrl
+                    ?? null,
+                status: "Spoofed",
+                clearLabel: "Use real",
+                onClear: () => equipProfileEffect(null),
+            };
+        }
+        if (realBanner) {
+            return {
+                label: realBanner.title ?? "Profile effect",
+                previewUrl: realBanner.thumbnailPreviewSrc
+                    ?? realBanner.staticFrameSrc
+                    ?? realBanner.reducedMotionSrc
+                    ?? shop.banner.find(i => i.skuId === realBanner.skuId)?.previewUrl
+                    ?? null,
+                status: "Equipped",
+                clearLabel: "Hide",
+                onClear: () => setProfileEffectHidden(true),
+            };
+        }
+        return null;
+    })();
+
+    const nameplateEquippedCard = (() => {
+        if (hideNameplate) {
+            if (!realNameplate) return null;
+            return {
+                label: realNameplate.label ?? "Nameplate",
+                previewUrl: realNameplate.previewUrl
+                    ?? (realNameplate.asset ? resolveNameplatePreviewUrl(realNameplate.asset) : null),
+                assetHint: realNameplate.asset,
+                status: "Hidden",
+                muted: true,
+                clearLabel: "Restore",
+                onClear: () => setNameplateHidden(false),
+            };
+        }
+        if (spoofNameplate) {
+            return {
+                label: spoofNameplate.label ?? "Nameplate",
+                previewUrl: spoofNameplate.previewUrl
+                    ?? (spoofNameplate.asset ? resolveNameplatePreviewUrl(spoofNameplate.asset) : null),
+                assetHint: spoofNameplate.asset,
+                status: "Spoofed",
+                clearLabel: "Use real",
+                onClear: () => equipNameplate(null),
+            };
+        }
+        if (realNameplate) {
+            return {
+                label: realNameplate.label ?? "Nameplate",
+                previewUrl: realNameplate.previewUrl
+                    ?? (realNameplate.asset ? resolveNameplatePreviewUrl(realNameplate.asset) : null),
+                assetHint: realNameplate.asset,
+                status: "Equipped",
+                clearLabel: "Hide",
+                onClear: () => setNameplateHidden(true),
+            };
+        }
+        return null;
+    })();
+
     const showSkeleton = loading || searching;
 
     return (
@@ -4316,12 +4638,14 @@ function DecorationsSection() {
             <div key={subTab} className="vc-larp-tab-panel">
                 {subTab === DecorationSubTabs.Avatar && (
                     <>
-                        {equippedAvatar && (
+                        {avatarEquippedCard && (
                             <EquippedDecorationCard
-                                label={equippedAvatar.label ?? "Avatar decoration"}
-                                previewUrl={equippedAvatar.previewUrl
-                                    ?? resolveAvatarDecorationPreviewUrl(equippedAvatar.skuId, equippedAvatar.asset)}
-                                onClear={() => equipAvatarDecoration(null)}
+                                label={avatarEquippedCard.label}
+                                previewUrl={avatarEquippedCard.previewUrl}
+                                status={avatarEquippedCard.status}
+                                muted={avatarEquippedCard.muted}
+                                clearLabel={avatarEquippedCard.clearLabel}
+                                onClear={avatarEquippedCard.onClear}
                             />
                         )}
                         {showSkeleton ? (
@@ -4356,17 +4680,14 @@ function DecorationsSection() {
 
                 {subTab === DecorationSubTabs.Banner && (
                     <>
-                        {equippedBanner && (
+                        {bannerEquippedCard && (
                             <EquippedDecorationCard
-                                label={equippedBanner.title ?? "Profile effect"}
-                                previewUrl={
-                                    equippedBanner.thumbnailPreviewSrc
-                                    ?? equippedBanner.staticFrameSrc
-                                    ?? equippedBanner.reducedMotionSrc
-                                    ?? shop.banner.find(i => i.skuId === equippedBanner.skuId)?.previewUrl
-                                    ?? null
-                                }
-                                onClear={() => equipProfileEffect(null)}
+                                label={bannerEquippedCard.label}
+                                previewUrl={bannerEquippedCard.previewUrl}
+                                status={bannerEquippedCard.status}
+                                muted={bannerEquippedCard.muted}
+                                clearLabel={bannerEquippedCard.clearLabel}
+                                onClear={bannerEquippedCard.onClear}
                             />
                         )}
                         {showSkeleton ? (
@@ -4401,16 +4722,16 @@ function DecorationsSection() {
 
                 {subTab === DecorationSubTabs.Nameplate && (
                     <>
-                        {equippedNameplate && (
+                        {nameplateEquippedCard && (
                             <EquippedDecorationCard
-                                label={equippedNameplate.label ?? "Nameplate"}
-                                previewUrl={equippedNameplate.previewUrl
-                                    ?? (equippedNameplate.asset
-                                        ? resolveNameplatePreviewUrl(equippedNameplate.asset)
-                                        : null)}
-                                assetHint={equippedNameplate.asset}
+                                label={nameplateEquippedCard.label}
+                                previewUrl={nameplateEquippedCard.previewUrl}
+                                assetHint={nameplateEquippedCard.assetHint}
+                                status={nameplateEquippedCard.status}
+                                muted={nameplateEquippedCard.muted}
+                                clearLabel={nameplateEquippedCard.clearLabel}
                                 wide
-                                onClear={() => equipNameplate(null)}
+                                onClear={nameplateEquippedCard.onClear}
                             />
                         )}
                         {showSkeleton ? (
@@ -4709,13 +5030,18 @@ function wrapOwnUserProfile(profile: NonNullable<ReturnType<typeof UserProfileSt
     const cached = wrappedProfileCache.get(profile);
     if (cached?.gen === profileWrapGeneration) return cached.value;
 
-    const canSpoofEffect = canSpoofLarpProfileEffect();
+    const hideEffect = isProfileEffectHidden();
+    const canSpoofEffect = !hideEffect && canSpoofLarpProfileEffect();
     const larpEffect = canSpoofEffect ? getLarpProfileEffect() : null;
     const joinDate = getCustomJoinDate();
     const wrapped = Object.assign(Object.create(Object.getPrototypeOf(profile)), profile, {
         badges: mergeProfileBadges(userId, profile.badges),
         connectedAccounts: applyLarpConnections(profile.connectedAccounts),
-        ...(canSpoofEffect && larpEffect ? {
+        ...(hideEffect ? {
+            profileEffect: null,
+            profileEffectId: null,
+            profileEffectExpiresAt: null,
+        } : canSpoofEffect && larpEffect ? {
             profileEffect: larpEffect,
             profileEffectId: (larpEffect as { id?: string; skuId?: string; }).id
                 ?? (larpEffect as { skuId?: string; }).skuId,
@@ -5094,7 +5420,7 @@ export default definePlugin({
                 },
                 {
                     match: /(?<={avatarDecoration:).{1,20}?(?=,)(?<=avatarDecorationOverride:(\i).+?)/,
-                    replace: "$1??vcLarpAvatarDecoration??($&)"
+                    replace: "$self.resolveLarpAvatarDecorationValue(vcLarpAvatarDecoration,$1??($&))"
                 },
                 {
                     match: /(?<=size:\i}\),\[)/,
@@ -5137,7 +5463,7 @@ export default definePlugin({
             find: ".DISPLAY_NAME_STYLES_COACHMARK)",
             replacement: {
                 match: /(?<=\i\)\({avatarDecoration:)\i(?=,)(?<=currentUser:(\i).+?)/,
-                replace: "$self.useLarpAvatarDecoration($1)??$&"
+                replace: "$self.pickLarpAvatarDecoration($1,$&)"
             }
         },
         ...[
@@ -5147,7 +5473,7 @@ export default definePlugin({
             find,
             replacement: {
                 match: /(?<=userValue:)((\i(?:\.author)?)\?\.avatarDecoration)/,
-                replace: "$self.useLarpAvatarDecoration($2)??$1"
+                replace: "$self.pickLarpAvatarDecoration($2,$1)"
             }
         })),
         {
@@ -5169,6 +5495,8 @@ export default definePlugin({
     withCustomUsernameOnly,
     withLarpUser,
     useLarpAvatarDecoration,
+    resolveLarpAvatarDecorationValue,
+    pickLarpAvatarDecoration,
     useLarpProfileEffect,
     useLarpNameplate,
     applyLarpNameplateOverride,

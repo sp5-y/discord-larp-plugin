@@ -34,6 +34,7 @@ Then **fully restart Discord** (tray icon too). Press **Ctrl+B** to open the too
 | `auto-setup.bat` | Clone/update Vencord, build, patch Discord |
 | `auto-setup.bat rebuild` | Copy plugin + rebuild only (no patch) |
 | `auto-setup.bat inject` | Rebuild + patch Discord |
+| `auto-setup.bat patch` | Patch Discord only (use after Discord updates) |
 
 ```bat
 set DISCORD_BRANCH=stable
@@ -43,6 +44,16 @@ set NOINJECT=1
 ```
 
 ## FAQ / troubleshooting
+
+### Setup finished but Vencord is gone / Settings has no Vencord tab
+Discord updates replace `app.asar` and wipe the patch. Older auto-setup also called the official installer in a mode that reported **Success** without actually patching.
+
+Fix:
+1. Fully quit Discord (tray icon too)
+2. Run `auto-setup.bat patch` (or `auto-setup.bat inject` if you also changed the plugin)
+3. Reopen Discord — Settings should show a **Vencord** section
+
+`auto-setup.bat` now patches Discord directly and **verifies** `_app.asar` + the stub before saying Done.
 
 ### Setup stuck on “enabling pnpm via corepack…”
 That means it is **not done** — corepack was hanging. Newer `auto-setup.bat` installs pnpm with `npm install -g pnpm@9` instead.
